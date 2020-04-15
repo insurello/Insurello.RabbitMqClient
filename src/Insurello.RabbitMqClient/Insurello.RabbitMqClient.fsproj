@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netcoreapp3.1</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="MqClient.fs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="FSharp.AsyncExtra" Version="2.1.0" />
+    <PackageReference Include="RabbitMq.Client" Version="5.1.2" />
+  </ItemGroup>
+
+
+</Project>
