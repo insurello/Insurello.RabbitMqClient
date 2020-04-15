@@ -3,7 +3,7 @@ namespace Insurello.RabbitMqClient
 [<RequireQualifiedAccess>]
 module MqClient =
 
-    open AsyncExtra
+    open Insurello.AsyncExtra
     open RabbitMQ.Client
     open RabbitMQ.Client.Events
     open RabbitMQ.Client.Exceptions
