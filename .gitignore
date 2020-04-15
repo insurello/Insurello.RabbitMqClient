@@ -6,6 +6,7 @@ src/*/obj
 
 # Release folder
 out
+Release
 
 # IDEs
 .vs

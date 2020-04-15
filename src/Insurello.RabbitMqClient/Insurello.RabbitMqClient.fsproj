@@ -2,6 +2,13 @@
 
   <PropertyGroup>
     <TargetFramework>netcoreapp3.1</TargetFramework>
+    <PackageId>Insurello.RabbitMqClient</PackageId>
+    <Authors>Insurello</Authors>
+    <Company>Insurello</Company>
+    <PackageDescription>F# wrapper around RabbitMq.Client</PackageDescription>
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/insurello/Insurello.RabbitMqClient</RepositoryUrl>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
   </PropertyGroup>
 
   <ItemGroup>
