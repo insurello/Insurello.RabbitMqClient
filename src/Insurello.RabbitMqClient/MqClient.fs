@@ -80,6 +80,8 @@ module MqClient =
                                                {| ReplyTo = replyTo
                                                   CorrelationId = messageId |}))
 
+    let routingKeyFromMessage: ReceivedMessage -> string = fun (Message(event, _)) -> event.RoutingKey
+
     let publishConfigJson: string -> string option -> Map<string, string> -> string -> PublishConfig =
         fun endpoint correlationId headers message ->
             { Timeout = System.TimeSpan.FromSeconds 30.0
@@ -427,6 +429,31 @@ module MqClient =
 
                     PublishResult.Acked
                 | Error errorMessage -> PublishResult.Unknown errorMessage)
+
+    let respond: Model -> ReceivedMessage -> string -> AsyncResult<PublishResult, string> =
+        fun (Model model) receivedMessage response ->
+            receivedMessage
+            |> extractReplyProperties
+            |> AsyncResult.fromResult
+            |> AsyncResult.map (fun replyProperties ->
+                let config =
+                    publishConfigJson replyProperties.ReplyTo (Some replyProperties.CorrelationId)
+                        (Map.ofList [ ("sequence_end", "true") ]) response // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
+
+                let messageId = System.Guid.NewGuid().ToString()
+
+                model.channelConsumer.Model.BasicPublish
+                    (exchange = "", routingKey = config.Endpoint, mandatory = false,  // mandatory must be false when publishing to direct-reply-to queue https://www.rabbitmq.com/direct-reply-to.html#limitations
+                     basicProperties =
+                         model.channelConsumer.Model.CreateBasicProperties
+                             (ContentType = config.ContentType, Persistent = true, MessageId = messageId,
+                              CorrelationId = config.CorrelationId,
+                              Headers =
+                                  (config.Headers
+                                   |> Map.map (fun _ v -> v :> obj)
+                                   |> (Map.toSeq >> dict))), body = config.Body)
+
+                PublishResult.Acked)
 
     let request: Model -> PublishConfig -> AsyncResult<ReceivedMessage, string> =
         fun (Model model) config ->
