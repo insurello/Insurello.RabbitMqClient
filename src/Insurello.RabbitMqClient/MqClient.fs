@@ -82,15 +82,6 @@ module MqClient =
 
     let routingKeyFromMessage: ReceivedMessage -> string = fun (Message(event, _)) -> event.RoutingKey
 
-    let publishConfigJson: string -> string option -> Map<string, string> -> string -> PublishConfig =
-        fun endpoint correlationId headers message ->
-            { Timeout = System.TimeSpan.FromSeconds 30.0
-              Endpoint = endpoint
-              ContentType = "application/json"
-              Headers = headers
-              CorrelationId = Option.defaultValue "" correlationId
-              Body = message |> System.Text.Encoding.UTF8.GetBytes }
-
     let private asTask: ModelData -> 'event -> (Message<'event> -> Async<unit>) -> System.Threading.Tasks.Task =
         fun model event callback ->
             async { do! callback (Message(event, model)) } |> Async.StartAsTask :> System.Threading.Tasks.Task
@@ -430,31 +421,10 @@ module MqClient =
                     PublishResult.Acked
                 | Error errorMessage -> PublishResult.Unknown errorMessage)
 
-    let respond: Model -> ReceivedMessage -> string -> AsyncResult<PublishResult, string> =
-        fun (Model model) receivedMessage response ->
-            receivedMessage
-            |> extractReplyProperties
-            |> AsyncResult.fromResult
-            |> AsyncResult.map (fun replyProperties ->
-                let config =
-                    publishConfigJson replyProperties.ReplyTo (Some replyProperties.CorrelationId)
-                        (Map.ofList [ ("sequence_end", "true") ]) response // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
-
-                let messageId = System.Guid.NewGuid().ToString()
-
-                model.channelConsumer.Model.BasicPublish
-                    (exchange = "", routingKey = config.Endpoint, mandatory = false,  // mandatory must be false when publishing to direct-reply-to queue https://www.rabbitmq.com/direct-reply-to.html#limitations
-                     basicProperties =
-                         model.channelConsumer.Model.CreateBasicProperties
-                             (ContentType = config.ContentType, Persistent = true, MessageId = messageId,
-                              CorrelationId = config.CorrelationId,
-                              Headers =
-                                  (config.Headers
-                                   |> Map.map (fun _ v -> v :> obj)
-                                   |> (Map.toSeq >> dict))), body = config.Body)
-
-                PublishResult.Acked)
-
+    /// <summary>Make an RPC-call to a RabbitMq queue.</summary>
+    /// <param name="Model">MqClient model.</param>
+    /// <param name="config">Config for where to publish and what to publish.</param>
+    /// <returns>Response from called RPC endpoint or error.</returns>
     let request: Model -> PublishConfig -> AsyncResult<ReceivedMessage, string> =
         fun (Model model) config ->
             async {
