@@ -48,16 +48,27 @@ module MqClient =
 
     type LogError = exn * string * obj -> unit
 
-    type PublishConfig =
-        { Timeout: System.TimeSpan
-          Endpoint: string
-          ContentType: string
-          CorrelationId: string
+    type Content =
+        | Json of string
+        | Binary of byte array
+
+    type PublishMessage =
+        { CorrelationId: string
           Headers: Map<string, string>
-          Body: byte [] }
+          Content: Content }
 
     type ChannelConfig =
         { withConfirmSelect: bool }
+
+    let private contentTypeStringFromContent: Content -> string =
+        function
+        | Json _ -> "application/json"
+        | Binary _ -> "application/octet-stream"
+
+    let private bodyFromContent: Content -> byte [] =
+        function
+        | Json jsonContent -> System.Text.Encoding.UTF8.GetBytes jsonContent
+        | Binary binaryContent -> binaryContent
 
     let private extractReplyTo: BasicDeliverEventArgs -> Result<string, string> =
         fun event ->
@@ -81,15 +92,6 @@ module MqClient =
                                                   CorrelationId = messageId |}))
 
     let routingKeyFromMessage: ReceivedMessage -> string = fun (Message(event, _)) -> event.RoutingKey
-
-    let publishConfigJson: string -> string option -> Map<string, string> -> string -> PublishConfig =
-        fun endpoint correlationId headers message ->
-            { Timeout = System.TimeSpan.FromSeconds 30.0
-              Endpoint = endpoint
-              ContentType = "application/json"
-              Headers = headers
-              CorrelationId = Option.defaultValue "" correlationId
-              Body = message |> System.Text.Encoding.UTF8.GetBytes }
 
     let private asTask: ModelData -> 'event -> (Message<'event> -> Async<unit>) -> System.Threading.Tasks.Task =
         fun model event callback ->
@@ -339,18 +341,18 @@ module MqClient =
                 |> Result.map initReplyQueue)
 
     /// Will publish with confirm.
-    let publishToQueue: Model -> PublishConfig -> Async<PublishResult> =
-        fun (Model model) config ->
+    let publishToQueue: Model -> System.TimeSpan -> string -> PublishMessage -> Async<PublishResult> =
+        fun (Model model) timeout routingKey message ->
             async {
                 let tcs = System.Threading.Tasks.TaskCompletionSource<PublishResult>()
-                use ct = new System.Threading.CancellationTokenSource(config.Timeout)
+                use ct = new System.Threading.CancellationTokenSource(timeout)
                 use _ctr =
                     ct.Token.Register
                         (callback =
                             (fun () ->
                                 tcs.SetResult
-                                    ((sprintf "Publish to queue '%s' timedout after %ss" config.Endpoint
-                                          (config.Timeout.TotalSeconds.ToString())) |> PublishResult.Timeout) |> ignore),
+                                    ((sprintf "Publish to queue '%s' timedout after %ss" routingKey
+                                          (timeout.TotalSeconds.ToString())) |> PublishResult.Timeout) |> ignore),
                          useSynchronizationContext = false)
 
                 let messageId = System.Guid.NewGuid().ToString()
@@ -370,15 +372,15 @@ module MqClient =
                         model.channelConsumer.Model.BasicNacks.AddHandler basicNackEventHandler
 
                         model.channelConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = config.Endpoint, mandatory = true,
+                            (exchange = "", routingKey = routingKey, mandatory = true,
                              basicProperties =
                                  model.channelConsumer.Model.CreateBasicProperties
-                                     (ContentType = config.ContentType, Persistent = true, MessageId = messageId,
-                                      CorrelationId = config.CorrelationId,
+                                     (ContentType = contentTypeStringFromContent message.Content, Persistent = true,
+                                      MessageId = messageId, CorrelationId = message.CorrelationId,
                                       Headers =
-                                          (config.Headers
+                                          (message.Headers
                                            |> Map.map (fun _ v -> v :> obj)
-                                           |> (Map.toSeq >> dict))), body = config.Body)
+                                           |> (Map.toSeq >> dict))), body = bodyFromContent message.Content)
 
                         (basicAckEventHandler, basicNackEventHandler))
 
@@ -394,9 +396,6 @@ module MqClient =
                        | Choice2Of2 reason -> PublishResult.Unknown(sprintf "Task cancelled: %A" reason)
             }
 
-    type Content =
-        | Json of string
-        | Binary of byte array
 
     let replyToMessage: Model -> ReceivedMessage -> (string * string) list -> Content -> Async<PublishResult> =
         fun (Model model) receivedMessage headers content ->
@@ -430,36 +429,17 @@ module MqClient =
                     PublishResult.Acked
                 | Error errorMessage -> PublishResult.Unknown errorMessage)
 
-    let respond: Model -> ReceivedMessage -> string -> AsyncResult<PublishResult, string> =
-        fun (Model model) receivedMessage response ->
-            receivedMessage
-            |> extractReplyProperties
-            |> AsyncResult.fromResult
-            |> AsyncResult.map (fun replyProperties ->
-                let config =
-                    publishConfigJson replyProperties.ReplyTo (Some replyProperties.CorrelationId)
-                        (Map.ofList [ ("sequence_end", "true") ]) response // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
-
-                let messageId = System.Guid.NewGuid().ToString()
-
-                model.channelConsumer.Model.BasicPublish
-                    (exchange = "", routingKey = config.Endpoint, mandatory = false,  // mandatory must be false when publishing to direct-reply-to queue https://www.rabbitmq.com/direct-reply-to.html#limitations
-                     basicProperties =
-                         model.channelConsumer.Model.CreateBasicProperties
-                             (ContentType = config.ContentType, Persistent = true, MessageId = messageId,
-                              CorrelationId = config.CorrelationId,
-                              Headers =
-                                  (config.Headers
-                                   |> Map.map (fun _ v -> v :> obj)
-                                   |> (Map.toSeq >> dict))), body = config.Body)
-
-                PublishResult.Acked)
-
-    let request: Model -> PublishConfig -> AsyncResult<ReceivedMessage, string> =
-        fun (Model model) config ->
+    /// <summary>Make an RPC-call to a RabbitMq queue.</summary>
+    /// <param name="Model">MqClient model.</param>
+    /// <param name="timeout">Seconds before timing out request.</param>
+    /// <param name="routingKey">Routing key to publish message to.</param>
+    /// <param name="message">Message to be published.</param>
+    /// <returns>Response from called RPC endpoint or error.</returns>
+    let request: Model -> System.TimeSpan -> string -> PublishMessage -> AsyncResult<ReceivedMessage, string> =
+        fun (Model model) timeout routingKey message ->
             async {
                 let tcs = System.Threading.Tasks.TaskCompletionSource<Result<ReceivedMessage, string>>()
-                use ct = new System.Threading.CancellationTokenSource(config.Timeout)
+                use ct = new System.Threading.CancellationTokenSource(timeout)
 
                 let messageId = System.Guid.NewGuid().ToString()
 
@@ -471,22 +451,22 @@ module MqClient =
 
                                 tcs.TrySetResult
                                     (Error
-                                        (sprintf "Publish to queue '%s' timedout after %ss" config.Endpoint
-                                             (config.Timeout.TotalSeconds.ToString()))) |> ignore),
+                                        (sprintf "Publish to queue '%s' timedout after %ss" routingKey
+                                             (timeout.TotalSeconds.ToString()))) |> ignore),
                          useSynchronizationContext = false)
 
                 try
                     if model.pendingRequests.TryAdd(messageId, tcs) then
                         model.rpcConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = config.Endpoint, mandatory = true,
+                            (exchange = "", routingKey = routingKey, mandatory = true,
                              basicProperties =
                                  model.rpcConsumer.Model.CreateBasicProperties
-                                     (ContentType = config.ContentType, Persistent = false, MessageId = messageId,
-                                      ReplyTo = "amq.rabbitmq.reply-to",
+                                     (ContentType = contentTypeStringFromContent message.Content, Persistent = false,
+                                      MessageId = messageId, ReplyTo = "amq.rabbitmq.reply-to",
                                       Headers =
-                                          (config.Headers
+                                          (message.Headers
                                            |> Map.map (fun _ v -> v :> obj)
-                                           |> (Map.toSeq >> dict))), body = config.Body)
+                                           |> (Map.toSeq >> dict))), body = bodyFromContent message.Content)
 
                         let! result = tcs.Task |> (Async.AwaitTask >> Async.Catch)
 
