@@ -52,10 +52,6 @@ module MqClient =
         | Json of string
         | Binary of byte array
 
-    type ConnectionConfig =
-        { Timeout: System.TimeSpan
-          RoutingKey: string }
-
     type PublishMessage =
         { CorrelationId: string
           Headers: Map<string, string>
@@ -345,19 +341,19 @@ module MqClient =
                 |> Result.map initReplyQueue)
 
     /// Will publish with confirm.
-    let publishToQueue: Model -> ConnectionConfig -> PublishMessage -> Async<PublishResult> =
-        fun (Model model) routeConfig message ->
+    let publishToQueue: Model -> System.TimeSpan -> string -> PublishMessage -> Async<PublishResult> =
+        fun (Model model) timeout routingKey message ->
             async {
                 let tcs = System.Threading.Tasks.TaskCompletionSource<PublishResult>()
-                use ct = new System.Threading.CancellationTokenSource(routeConfig.Timeout)
+                use ct = new System.Threading.CancellationTokenSource(timeout)
                 use _ctr =
                     ct.Token.Register
                         (callback =
                             (fun () ->
                                 tcs.SetResult
-                                    ((sprintf "Publish to queue '%s' timedout after %ss" routeConfig.RoutingKey
-                                          (routeConfig.Timeout.TotalSeconds.ToString())) |> PublishResult.Timeout)
-                                |> ignore), useSynchronizationContext = false)
+                                    ((sprintf "Publish to queue '%s' timedout after %ss" routingKey
+                                          (timeout.TotalSeconds.ToString())) |> PublishResult.Timeout) |> ignore),
+                         useSynchronizationContext = false)
 
                 let messageId = System.Guid.NewGuid().ToString()
 
@@ -376,7 +372,7 @@ module MqClient =
                         model.channelConsumer.Model.BasicNacks.AddHandler basicNackEventHandler
 
                         model.channelConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = routeConfig.RoutingKey, mandatory = true,
+                            (exchange = "", routingKey = routingKey, mandatory = true,
                              basicProperties =
                                  model.channelConsumer.Model.CreateBasicProperties
                                      (ContentType = contentTypeStringFromContent message.Content, Persistent = true,
@@ -438,11 +434,11 @@ module MqClient =
     /// <param name="Model">MqClient model.</param>
     /// <param name="config">Config for where to publish and what to publish.</param>
     /// <returns>Response from called RPC endpoint or error.</returns>
-    let request: Model -> ConnectionConfig -> PublishMessage -> AsyncResult<ReceivedMessage, string> =
-        fun (Model model) routeConfig message ->
+    let request: Model -> System.TimeSpan -> string -> PublishMessage -> AsyncResult<ReceivedMessage, string> =
+        fun (Model model) timeout routingKey message ->
             async {
                 let tcs = System.Threading.Tasks.TaskCompletionSource<Result<ReceivedMessage, string>>()
-                use ct = new System.Threading.CancellationTokenSource(routeConfig.Timeout)
+                use ct = new System.Threading.CancellationTokenSource(timeout)
 
                 let messageId = System.Guid.NewGuid().ToString()
 
@@ -454,14 +450,14 @@ module MqClient =
 
                                 tcs.TrySetResult
                                     (Error
-                                        (sprintf "Publish to queue '%s' timedout after %ss" routeConfig.RoutingKey
-                                             (routeConfig.Timeout.TotalSeconds.ToString()))) |> ignore),
+                                        (sprintf "Publish to queue '%s' timedout after %ss" routingKey
+                                             (timeout.TotalSeconds.ToString()))) |> ignore),
                          useSynchronizationContext = false)
 
                 try
                     if model.pendingRequests.TryAdd(messageId, tcs) then
                         model.rpcConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = routeConfig.RoutingKey, mandatory = true,
+                            (exchange = "", routingKey = routingKey, mandatory = true,
                              basicProperties =
                                  model.rpcConsumer.Model.CreateBasicProperties
                                      (ContentType = contentTypeStringFromContent message.Content, Persistent = false,
