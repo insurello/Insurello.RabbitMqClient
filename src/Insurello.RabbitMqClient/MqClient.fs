@@ -432,7 +432,9 @@ module MqClient =
 
     /// <summary>Make an RPC-call to a RabbitMq queue.</summary>
     /// <param name="Model">MqClient model.</param>
-    /// <param name="config">Config for where to publish and what to publish.</param>
+    /// <param name="timeout">Seconds before timeing out request</param>
+    /// <param name="routingKey">Routing key to publish message to</param>
+    /// <param name="message">Message to be published</param>
     /// <returns>Response from called RPC endpoint or error.</returns>
     let request: Model -> System.TimeSpan -> string -> PublishMessage -> AsyncResult<ReceivedMessage, string> =
         fun (Model model) timeout routingKey message ->
