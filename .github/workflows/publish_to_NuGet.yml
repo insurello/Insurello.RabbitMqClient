@@ -21,8 +21,4 @@ jobs:
       - name: Publish the package to NuGet
         env:
           NUGET_AUTH_TOKEN: ${{secrets.NUGET_AUTH_TOKEN}}
-        run: dotnet nuget push Release/*.nupkg --skip-duplicate --no-symbols true --source https://api.nuget.org/v3/index.json -k ${NUGET_AUTH_TOKEN}
-      - name: Publish .snupkg to NuGet
-        env:
-          NUGET_AUTH_TOKEN: ${{secrets.NUGET_AUTH_TOKEN}}
-        run: dotnet nuget push Release/*.snupkg --skip-duplicate --no-symbols true --source https://api.nuget.org/v3/index.json -k ${NUGET_AUTH_TOKEN}
+        run: dotnet nuget push Release/*.nupkg --skip-duplicate --no-symbols false --source https://api.nuget.org/v3/index.json -k ${NUGET_AUTH_TOKEN}
