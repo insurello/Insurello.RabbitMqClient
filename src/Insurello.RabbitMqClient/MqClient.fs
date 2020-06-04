@@ -57,8 +57,11 @@ module MqClient =
           Headers: Map<string, string>
           Content: Content }
 
-    type ChannelConfig =
-        { withConfirmSelect: bool }
+    type private ChannelConfig =
+        { withConfirmSelect: bool
+          prefetchCount: uint16 }
+          
+    type PrefetchCount = PrefetchCount of uint16
 
     let private contentTypeStringFromContent: Content -> string =
         function
@@ -171,6 +174,7 @@ module MqClient =
         fun config exCallback connection ->
             try
                 let model = connection.CreateModel()
+                model.BasicQos(uint32 0, config.prefetchCount,false)
 
                 if config.withConfirmSelect then model.ConfirmSelect()
 
@@ -306,8 +310,13 @@ module MqClient =
 
     let messageId: ReceivedMessage -> string = fun (Message(event, _)) -> event.BasicProperties.MessageId
 
-    let init: LogError -> string -> System.Uri -> (Model -> Topology) -> Result<Model, string> =
-        fun logError nameOfClient uri getTopology ->
+    let init: LogError -> string -> System.Uri -> Option<PrefetchCount> -> (Model -> Topology) -> Result<Model, string> =
+        fun logError nameOfClient uri prefetchCountOption getTopology ->
+            let prefetchCount = 
+                prefetchCountOption 
+                |> Option.map (fun (PrefetchCount prefetchCount) -> prefetchCount)
+                |> Option.defaultValue (uint16 10)
+                                
             connect nameOfClient uri
             |> Result.bind (fun connection ->
                 let exCallback =
@@ -315,9 +324,9 @@ module MqClient =
                         logError (ex, "Unhandled exception on channel in context {$c}", context)
                         closeConnectionAsync (System.TimeSpan.FromSeconds 3.0) connection)
 
-                createChannel { withConfirmSelect = true } exCallback connection
+                createChannel { withConfirmSelect = true; prefetchCount = prefetchCount } exCallback connection
                 |> Result.bind (fun channel ->
-                    createChannel { withConfirmSelect = false } exCallback connection
+                    createChannel { withConfirmSelect = false; prefetchCount = prefetchCount } exCallback connection
                     |> Result.map (fun rpcChannel ->
                         Model
                             { channelConsumer = AsyncEventingBasicConsumer channel
