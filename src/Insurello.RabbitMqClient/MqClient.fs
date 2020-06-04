@@ -310,8 +310,13 @@ module MqClient =
 
     let messageId: ReceivedMessage -> string = fun (Message(event, _)) -> event.BasicProperties.MessageId
 
-    let init: LogError -> string -> System.Uri -> PrefetchCount -> (Model -> Topology) -> Result<Model, string> =
-        fun logError nameOfClient uri (PrefetchCount prefetchCount) getTopology ->
+    let init: LogError -> string -> System.Uri -> Option<PrefetchCount> -> (Model -> Topology) -> Result<Model, string> =
+        fun logError nameOfClient uri prefetchCountOption getTopology ->
+            let prefetchCount = 
+                prefetchCountOption 
+                |> Option.map (fun (PrefetchCount prefetchCount) -> prefetchCount)
+                |> Option.defaultValue (uint16 10)
+                                
             connect nameOfClient uri
             |> Result.bind (fun connection ->
                 let exCallback =
