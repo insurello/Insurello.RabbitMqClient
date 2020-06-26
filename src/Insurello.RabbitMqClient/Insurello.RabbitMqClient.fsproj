@@ -22,7 +22,7 @@
 
   <!-- Source Link repo configuration -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" PrivateAssets="All"/>
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
@@ -31,7 +31,7 @@
 
   <ItemGroup>
     <PackageReference Include="Insurello.AsyncExtra" Version="1.0.0" />
-    <PackageReference Include="RabbitMq.Client" Version="5.1.2" />
+    <PackageReference Include="RabbitMq.Client" Version="6.1.0" />
   </ItemGroup>
 
 

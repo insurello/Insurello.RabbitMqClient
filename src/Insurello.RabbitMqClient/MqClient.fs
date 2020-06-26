@@ -60,7 +60,7 @@ module MqClient =
     type private ChannelConfig =
         { withConfirmSelect: bool
           prefetchCount: uint16 }
-          
+
     type PrefetchCount = PrefetchCount of uint16
 
     let private contentTypeStringFromContent: Content -> string =
@@ -85,25 +85,30 @@ module MqClient =
             | null -> Error "Missing message_id property."
             | messageId -> Ok messageId
 
-    let extractReplyProperties: Message<BasicDeliverEventArgs> -> Result<{| ReplyTo: string; CorrelationId: string |}, string> =
-        fun (Message(event, _)) ->
+    let extractReplyProperties: Message<BasicDeliverEventArgs> -> Result<{| ReplyTo: string
+                                                                            CorrelationId: string |}, string> =
+        fun (Message (event, _)) ->
             event
             |> extractReplyTo
             |> Result.bind (fun replyTo ->
-                extractMesssageId event |> Result.map (fun messageId ->
-                                               {| ReplyTo = replyTo
-                                                  CorrelationId = messageId |}))
+                extractMesssageId event
+                |> Result.map (fun messageId ->
+                    {| ReplyTo = replyTo
+                       CorrelationId = messageId |}))
 
-    let routingKeyFromMessage: ReceivedMessage -> string = fun (Message(event, _)) -> event.RoutingKey
+    let routingKeyFromMessage: ReceivedMessage -> string =
+        fun (Message (event, _)) -> event.RoutingKey
 
     let private asTask: ModelData -> 'event -> (Message<'event> -> Async<unit>) -> System.Threading.Tasks.Task =
         fun model event callback ->
-            async { do! callback (Message(event, model)) } |> Async.StartAsTask :> System.Threading.Tasks.Task
+            async { do! callback (Message(event, model)) }
+            |> Async.StartAsTask :> System.Threading.Tasks.Task
 
     let private consumeQueue: Model -> string -> QueueTopology -> Model =
         fun (Model model) uniqueTag queueTopology ->
 
-            let consumerTag = queueTopology.Queue + "-consumer-" + uniqueTag
+            let consumerTag =
+                queueTopology.Queue + "-consumer-" + uniqueTag
 
             let doNothingTask: unit -> System.Threading.Tasks.Task =
                 (fun () -> async.Return() |> Async.StartAsTask :> System.Threading.Tasks.Task)
@@ -111,29 +116,35 @@ module MqClient =
             model.channelConsumer.add_Received (fun _sender event ->
                 if event.ConsumerTag = consumerTag
                 then asTask model event queueTopology.ConsumeCallbacks.OnReceived
-                else doNothingTask())
+                else doNothingTask ())
 
             model.channelConsumer.add_Registered (fun _sender event ->
-                if event.ConsumerTag = consumerTag
+                if event.ConsumerTags = Array.singleton consumerTag
                 then asTask model event queueTopology.ConsumeCallbacks.OnRegistered
-                else doNothingTask())
+                else doNothingTask ())
 
             model.channelConsumer.add_Unregistered (fun _sender event ->
-                if event.ConsumerTag = consumerTag
+                if event.ConsumerTags = Array.singleton consumerTag
                 then asTask model event queueTopology.ConsumeCallbacks.OnUnregistered
-                else doNothingTask())
+                else doNothingTask ())
 
-            model.channelConsumer.add_Shutdown
-                (fun _sender event -> asTask model event queueTopology.ConsumeCallbacks.OnShutdown)
+            model.channelConsumer.add_Shutdown (fun _sender event ->
+                asTask model event queueTopology.ConsumeCallbacks.OnShutdown)
 
             model.channelConsumer.add_ConsumerCancelled (fun _sender event ->
-                if event.ConsumerTag = consumerTag
+                if event.ConsumerTags = Array.singleton consumerTag
                 then asTask model event queueTopology.ConsumeCallbacks.OnConsumerCancelled
-                else doNothingTask())
+                else doNothingTask ())
 
             model.channelConsumer.Model.BasicConsume
-                (queue = queueTopology.Queue, autoAck = false, consumerTag = consumerTag, noLocal = false,
-                 exclusive = false, arguments = null, consumer = model.channelConsumer) |> ignore
+                (queue = queueTopology.Queue,
+                 autoAck = false,
+                 consumerTag = consumerTag,
+                 noLocal = false,
+                 exclusive = false,
+                 arguments = null,
+                 consumer = model.channelConsumer)
+            |> ignore
 
             Model model
 
@@ -162,8 +173,7 @@ module MqClient =
             | :? System.ArgumentException as ex -> Error ex.Message
 
     let private closeConnection: IConnection -> unit =
-        fun connection ->
-            if connection.IsOpen then connection.Close() else ()
+        fun connection -> if connection.IsOpen then connection.Close() else ()
 
     let private closeConnectionAsync: System.TimeSpan -> IConnection -> unit =
         fun waitTimeout connection ->
@@ -174,7 +184,7 @@ module MqClient =
         fun config exCallback connection ->
             try
                 let model = connection.CreateModel()
-                model.BasicQos(uint32 0, config.prefetchCount,false)
+                model.BasicQos(uint32 0, config.prefetchCount, false)
 
                 if config.withConfirmSelect then model.ConfirmSelect()
 
@@ -196,6 +206,7 @@ module MqClient =
                     (queueTopology.MessageTimeToLive
                      |> Option.map (fun ttl -> [ ("x-message-ttl", ttl :> obj) ])
                      |> Option.defaultValue [])
+
             try
                 model.channelConsumer.Model.QueueDeclare
                     (queue = name, durable = true, exclusive = false, autoDelete = false, arguments = arguments)
@@ -210,8 +221,11 @@ module MqClient =
                 match queueTopology.BindToExchange with
                 | Some exchangeName ->
                     model.channelConsumer.Model.QueueBind
-                        (queue = queueTopology.Queue, exchange = nonNullString exchangeName, routingKey = "*",
-                         arguments = null) |> ignore
+                        (queue = queueTopology.Queue,
+                         exchange = nonNullString exchangeName,
+                         routingKey = "*",
+                         arguments = null)
+                    |> ignore
                 | None -> ()
                 Ok queueTopology
             with ex -> Error ex.Message
@@ -225,10 +239,14 @@ module MqClient =
     let private initReplyQueue: Model -> Model =
         fun (Model model) ->
             let queueName = "amq.rabbitmq.reply-to"
-            let consumerTag = queueName + "-consumer-" + System.Guid.NewGuid().ToString()
+
+            let consumerTag =
+                queueName
+                + "-consumer-"
+                + System.Guid.NewGuid().ToString()
 
             let onReceived: ReceivedMessage -> Async<unit> =
-                (fun ((Message(event, _)) as message) ->
+                (fun ((Message (event, _)) as message) ->
                     let correlationId = event.BasicProperties.CorrelationId
 
                     match dictRemoveMutable correlationId model.pendingRequests with
@@ -258,13 +276,18 @@ module MqClient =
                     async.Return()))
 
             model.rpcConsumer.Model.BasicConsume
-                (queue = queueName, autoAck = true, consumerTag = consumerTag, noLocal = false, exclusive = false,
-                 arguments = null, consumer = model.rpcConsumer) |> ignore // Must be true for direct-reply-to
+                (queue = queueName,
+                 autoAck = true,
+                 consumerTag = consumerTag,
+                 noLocal = false,
+                 exclusive = false,
+                 arguments = null,
+                 consumer = model.rpcConsumer)
+            |> ignore // Must be true for direct-reply-to
 
             Model model
 
-    let private createBasicReturnEventHandler: string -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicReturnEventArgs>
-        =
+    let private createBasicReturnEventHandler: string -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicReturnEventArgs> =
         fun messageId tcs ->
             System.EventHandler<BasicReturnEventArgs>(fun _ args ->
                 if args.BasicProperties.MessageId = messageId then
@@ -272,20 +295,19 @@ module MqClient =
                         (PublishResult.ReturnError
                             (sprintf
                                 "Failed to publish to queue: ReplyCode: %i, ReplyText: %s, Exchange: %s, RoutingKey: %s"
-                                 args.ReplyCode args.ReplyText args.Exchange args.RoutingKey)) |> ignore
+                                 args.ReplyCode args.ReplyText args.Exchange args.RoutingKey))
+                    |> ignore
                 else
                     ())
 
-    let private createBasicAckEventHandler: uint64 -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicAckEventArgs>
-        =
+    let private createBasicAckEventHandler: uint64 -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicAckEventArgs> =
         fun publishSeqNo tcs ->
             System.EventHandler<BasicAckEventArgs>(fun _ args ->
                 if args.DeliveryTag = publishSeqNo
                 then tcs.TrySetResult(PublishResult.Acked) |> ignore
                 else ())
 
-    let private createBasicNackEventHandler: uint64 -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicNackEventArgs>
-        =
+    let private createBasicNackEventHandler: uint64 -> System.Threading.Tasks.TaskCompletionSource<PublishResult> -> System.EventHandler<BasicNackEventArgs> =
         fun publishSeqNo tcs ->
             System.EventHandler<BasicNackEventArgs>(fun _ args ->
                 if args.DeliveryTag = publishSeqNo
@@ -293,30 +315,33 @@ module MqClient =
                 else ())
 
     let ackMessage: ReceivedMessage -> unit =
-        fun (Message(event, model)) ->
+        fun (Message (event, model)) ->
             model.channelConsumer.Model.BasicAck(deliveryTag = event.DeliveryTag, multiple = false)
 
     let nackMessage: ReceivedMessage -> unit =
-        fun (Message(event, model)) ->
+        fun (Message (event, model)) ->
             model.channelConsumer.Model.BasicNack(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
 
     let nackMessageWithoutRequeue: ReceivedMessage -> unit =
-        fun (Message(event, model)) ->
+        fun (Message (event, model)) ->
             model.channelConsumer.Model.BasicNack(deliveryTag = event.DeliveryTag, multiple = false, requeue = false)
 
-    let messageBody: ReceivedMessage -> byte [] = fun (Message(event, _)) -> event.Body
+    let messageBody: ReceivedMessage -> byte [] =
+        fun (Message (event, _)) -> event.Body.ToArray()
 
-    let messageBodyAsString: ReceivedMessage -> RawBody = messageBody >> System.Text.Encoding.UTF8.GetString
+    let messageBodyAsString: ReceivedMessage -> RawBody =
+        messageBody >> System.Text.Encoding.UTF8.GetString
 
-    let messageId: ReceivedMessage -> string = fun (Message(event, _)) -> event.BasicProperties.MessageId
+    let messageId: ReceivedMessage -> string =
+        fun (Message (event, _)) -> event.BasicProperties.MessageId
 
     let init: LogError -> string -> System.Uri -> Option<PrefetchCount> -> (Model -> Topology) -> Result<Model, string> =
         fun logError nameOfClient uri prefetchCountOption getTopology ->
-            let prefetchCount = 
-                prefetchCountOption 
+            let prefetchCount =
+                prefetchCountOption
                 |> Option.map (fun (PrefetchCount prefetchCount) -> prefetchCount)
                 |> Option.defaultValue (uint16 10)
-                                
+
             connect nameOfClient uri
             |> Result.bind (fun connection ->
                 let exCallback =
@@ -324,9 +349,13 @@ module MqClient =
                         logError (ex, "Unhandled exception on channel in context {$c}", context)
                         closeConnectionAsync (System.TimeSpan.FromSeconds 3.0) connection)
 
-                createChannel { withConfirmSelect = true; prefetchCount = prefetchCount } exCallback connection
+                createChannel
+                    { withConfirmSelect = true
+                      prefetchCount = prefetchCount } exCallback connection
                 |> Result.bind (fun channel ->
-                    createChannel { withConfirmSelect = false; prefetchCount = prefetchCount } exCallback connection
+                    createChannel
+                        { withConfirmSelect = false
+                          prefetchCount = prefetchCount } exCallback connection
                     |> Result.map (fun rpcChannel ->
                         Model
                             { channelConsumer = AsyncEventingBasicConsumer channel
@@ -339,7 +368,9 @@ module MqClient =
             |> Result.bind (fun model ->
                 let declareAQueue = declareQueue model
                 let bindAQueue = bindQueueToExchange model
-                let consumeAQueue = consumeQueue model (System.Guid.NewGuid().ToString())
+
+                let consumeAQueue =
+                    consumeQueue model (System.Guid.NewGuid().ToString())
 
                 getTopology model
                 |> List.fold (fun prevResult queueTopology ->
@@ -353,43 +384,60 @@ module MqClient =
     let publishToQueue: Model -> System.TimeSpan -> string -> PublishMessage -> Async<PublishResult> =
         fun (Model model) timeout routingKey message ->
             async {
-                let tcs = System.Threading.Tasks.TaskCompletionSource<PublishResult>()
-                use ct = new System.Threading.CancellationTokenSource(timeout)
+                let tcs =
+                    System.Threading.Tasks.TaskCompletionSource<PublishResult>()
+
+                use ct =
+                    new System.Threading.CancellationTokenSource(timeout)
+
                 use _ctr =
                     ct.Token.Register
                         (callback =
                             (fun () ->
                                 tcs.SetResult
                                     ((sprintf "Publish to queue '%s' timedout after %ss" routingKey
-                                          (timeout.TotalSeconds.ToString())) |> PublishResult.Timeout) |> ignore),
+                                          (timeout.TotalSeconds.ToString()))
+                                     |> PublishResult.Timeout)
+                                |> ignore),
                          useSynchronizationContext = false)
 
                 let messageId = System.Guid.NewGuid().ToString()
 
-                let basicReturnEventHandler = createBasicReturnEventHandler messageId tcs
+                let basicReturnEventHandler =
+                    createBasicReturnEventHandler messageId tcs
 
                 model.channelConsumer.Model.BasicReturn.AddHandler basicReturnEventHandler
 
                 let (basicAckEventHandler, basicNackEventHandler) =
                     lock model (fun () ->
-                        let nextPublishSeqNo = model.channelConsumer.Model.NextPublishSeqNo
+                        let nextPublishSeqNo =
+                            model.channelConsumer.Model.NextPublishSeqNo
 
-                        let basicAckEventHandler = createBasicAckEventHandler nextPublishSeqNo tcs
+                        let basicAckEventHandler =
+                            createBasicAckEventHandler nextPublishSeqNo tcs
+
                         model.channelConsumer.Model.BasicAcks.AddHandler basicAckEventHandler
 
-                        let basicNackEventHandler = createBasicNackEventHandler nextPublishSeqNo tcs
+                        let basicNackEventHandler =
+                            createBasicNackEventHandler nextPublishSeqNo tcs
+
                         model.channelConsumer.Model.BasicNacks.AddHandler basicNackEventHandler
 
                         model.channelConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = routingKey, mandatory = true,
+                            (exchange = "",
+                             routingKey = routingKey,
+                             mandatory = true,
                              basicProperties =
                                  model.channelConsumer.Model.CreateBasicProperties
-                                     (ContentType = contentTypeStringFromContent message.Content, Persistent = true,
-                                      MessageId = messageId, CorrelationId = message.CorrelationId,
+                                     (ContentType = contentTypeStringFromContent message.Content,
+                                      Persistent = true,
+                                      MessageId = messageId,
+                                      CorrelationId = message.CorrelationId,
                                       Headers =
                                           (message.Headers
                                            |> Map.map (fun _ v -> v :> obj)
-                                           |> (Map.toSeq >> dict))), body = bodyFromContent message.Content)
+                                           |> (Map.toSeq >> dict))),
+                             body = new System.ReadOnlyMemory<byte>(bodyFromContent message.Content))
 
                         (basicAckEventHandler, basicNackEventHandler))
 
@@ -413,7 +461,8 @@ module MqClient =
             |> AsyncResult.fromResult
             |> Async.map (function
                 | Ok replyProperties ->
-                    let headers = Map([ ("sequence_end", "true") ] @ headers) // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
+                    let headers =
+                        Map([ ("sequence_end", "true") ] @ headers) // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
 
                     let (contentType, body) =
                         match content with
@@ -423,17 +472,21 @@ module MqClient =
                     let messageId = System.Guid.NewGuid().ToString()
 
                     model.channelConsumer.Model.BasicPublish
-                        (exchange = "", routingKey = replyProperties.ReplyTo,
+                        (exchange = "",
+                         routingKey = replyProperties.ReplyTo,
                          // mandatory must be false when publishing to direct-reply-to queue https://www.rabbitmq.com/direct-reply-to.html#limitations
                          mandatory = false,
                          basicProperties =
                              model.channelConsumer.Model.CreateBasicProperties
-                                 (ContentType = contentType, Persistent = true, MessageId = messageId,
+                                 (ContentType = contentType,
+                                  Persistent = true,
+                                  MessageId = messageId,
                                   CorrelationId = replyProperties.CorrelationId,
                                   Headers =
                                       (headers
                                        |> Map.map (fun _ v -> v :> obj)
-                                       |> (Map.toSeq >> dict))), body = body)
+                                       |> (Map.toSeq >> dict))),
+                         body = new System.ReadOnlyMemory<byte>(body))
 
                     PublishResult.Acked
                 | Error errorMessage -> PublishResult.Unknown errorMessage)
@@ -447,8 +500,11 @@ module MqClient =
     let request: Model -> System.TimeSpan -> string -> PublishMessage -> AsyncResult<ReceivedMessage, string> =
         fun (Model model) timeout routingKey message ->
             async {
-                let tcs = System.Threading.Tasks.TaskCompletionSource<Result<ReceivedMessage, string>>()
-                use ct = new System.Threading.CancellationTokenSource(timeout)
+                let tcs =
+                    System.Threading.Tasks.TaskCompletionSource<Result<ReceivedMessage, string>>()
+
+                use ct =
+                    new System.Threading.CancellationTokenSource(timeout)
 
                 let messageId = System.Guid.NewGuid().ToString()
 
@@ -456,26 +512,33 @@ module MqClient =
                     ct.Token.Register
                         (callback =
                             (fun () ->
-                                dictRemoveMutable messageId model.pendingRequests |> ignore
+                                dictRemoveMutable messageId model.pendingRequests
+                                |> ignore
 
                                 tcs.TrySetResult
                                     (Error
                                         (sprintf "Publish to queue '%s' timedout after %ss" routingKey
-                                             (timeout.TotalSeconds.ToString()))) |> ignore),
+                                             (timeout.TotalSeconds.ToString())))
+                                |> ignore),
                          useSynchronizationContext = false)
 
                 try
                     if model.pendingRequests.TryAdd(messageId, tcs) then
                         model.rpcConsumer.Model.BasicPublish
-                            (exchange = "", routingKey = routingKey, mandatory = true,
+                            (exchange = "",
+                             routingKey = routingKey,
+                             mandatory = true,
                              basicProperties =
                                  model.rpcConsumer.Model.CreateBasicProperties
-                                     (ContentType = contentTypeStringFromContent message.Content, Persistent = false,
-                                      MessageId = messageId, ReplyTo = "amq.rabbitmq.reply-to",
+                                     (ContentType = contentTypeStringFromContent message.Content,
+                                      Persistent = false,
+                                      MessageId = messageId,
+                                      ReplyTo = "amq.rabbitmq.reply-to",
                                       Headers =
                                           (message.Headers
                                            |> Map.map (fun _ v -> v :> obj)
-                                           |> (Map.toSeq >> dict))), body = bodyFromContent message.Content)
+                                           |> (Map.toSeq >> dict))),
+                             body = new System.ReadOnlyMemory<byte>(bodyFromContent message.Content))
 
                         let! result = tcs.Task |> (Async.AwaitTask >> Async.Catch)
 
@@ -501,25 +564,23 @@ module MqClient =
                       |> Async.map (function
                           | Choice1Of2 _ -> ()
                           | Choice2Of2 err ->
-                              logError
-                                  (err,
-                                   (sprintf "💥 Unexpected error. %A\nShutting down" err), ())
+                              logError (err, (sprintf "💥 Unexpected error. %A\nShutting down" err), ())
 
                               exit 2)
 
-              OnRegistered = fun _ -> Async.singleton()
+              OnRegistered = fun _ -> Async.singleton ()
 
               OnUnregistered =
                   fun _ ->
                       failwith "Got OnUnregistered event"
-                      Async.singleton()
+                      Async.singleton ()
 
               OnConsumerCancelled =
                   fun _ ->
                       failwith "Got OnConsumerCancelled event"
-                      Async.singleton()
+                      Async.singleton ()
 
               OnShutdown =
                   fun _ ->
                       failwith "Got OnShutdown event"
-                      Async.singleton() }
+                      Async.singleton () }
