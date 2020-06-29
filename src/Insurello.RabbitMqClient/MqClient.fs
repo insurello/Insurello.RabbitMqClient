@@ -436,7 +436,10 @@ module MqClient =
                                      (ContentType = contentTypeStringFromContent message.Content,
                                       Persistent = true,
                                       MessageId = messageId,
-                                      CorrelationId = message.CorrelationId,
+                                      CorrelationId =
+                                          (match message.CorrelationId with
+                                           | Generate -> ""
+                                           | Id correlationId -> correlationId),
                                       Headers =
                                           (message.Headers
                                            |> Map.map (fun _ v -> v :> obj)
