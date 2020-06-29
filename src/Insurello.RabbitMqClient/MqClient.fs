@@ -52,8 +52,12 @@ module MqClient =
         | Json of string
         | Binary of byte array
 
+    type CorrelationId =
+        | Generate
+        | Id of string
+
     type PublishMessage =
-        { CorrelationId: string
+        { CorrelationId: CorrelationId
           Headers: Map<string, string>
           Content: Content }
 
@@ -62,6 +66,7 @@ module MqClient =
           prefetchCount: uint16 }
 
     type PrefetchCount = PrefetchCount of uint16
+
 
     let private contentTypeStringFromContent: Content -> string =
         function
