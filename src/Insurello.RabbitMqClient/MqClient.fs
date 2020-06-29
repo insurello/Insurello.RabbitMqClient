@@ -67,7 +67,6 @@ module MqClient =
 
     type PrefetchCount = PrefetchCount of uint16
 
-
     let private contentTypeStringFromContent: Content -> string =
         function
         | Json _ -> "application/json"
