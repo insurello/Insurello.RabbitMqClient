@@ -558,28 +558,21 @@ module MqClient =
         fun logError onReceived ->
             { OnReceived =
                   fun message ->
-                      onReceived message
-                      |> Async.Catch
-                      |> Async.map (function
-                          | Choice1Of2 _ -> ()
-                          | Choice2Of2 err ->
-                              logError (err, (sprintf "💥 Unexpected error. %A\nShutting down" err), ())
-
-                              exit 2)
+                      // Somthing weird happens with exception handeling when not
+                      // using Async computational expression. Some exepctions are
+                      // silenty swollowed and never bubbles up.
+                      async {
+                          try
+                              do! onReceived message
+                          with exn ->
+                              logError (exn, (sprintf "💥 Unexpected error. %A\nShutting down" exn), ())
+                              exit 2
+                      }
 
               OnRegistered = fun _ -> Async.singleton ()
 
-              OnUnregistered =
-                  fun _ ->
-                      failwith "Got OnUnregistered event"
-                      Async.singleton ()
+              OnUnregistered = fun _ -> failwith "Got OnUnregistered event"
 
-              OnConsumerCancelled =
-                  fun _ ->
-                      failwith "Got OnConsumerCancelled event"
-                      Async.singleton ()
+              OnConsumerCancelled = fun _ -> failwith "Got OnConsumerCancelled event"
 
-              OnShutdown =
-                  fun _ ->
-                      failwith "Got OnShutdown event"
-                      Async.singleton () }
+              OnShutdown = fun _ -> failwith "Got OnShutdown event" }
