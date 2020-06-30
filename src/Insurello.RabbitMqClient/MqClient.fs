@@ -345,10 +345,11 @@ module MqClient =
     let nackMessageWithoutRequeueAsync: ReceivedMessage -> Async<unit> =
         nackMessageWithoutRequeue >> Async.singleton
 
-    let private clamp minValue maxValue value = value |> max minValue |> min maxValue
 
     let nackMessageWithDelay: System.TimeSpan -> ReceivedMessage -> Async<unit> =
         fun delay msg ->
+            let clamp minValue maxValue value = value |> max minValue |> min maxValue
+
             delay.TotalMilliseconds
             |> round
             |> clamp 0.0 (float System.Int32.MaxValue)
