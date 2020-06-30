@@ -23,6 +23,16 @@ module MqClient =
 
     type Model = private | Model of ModelData
 
+    /// <summary>
+    /// The maximum number of MQ messages to be fetched from queues and get processed at a time by the RabbitMQ client.
+    /// We recommend setting it to DefaultToTen if you don't know what you are doing.
+    /// </summary>
+    /// <returns>PrefetchConfig</returns>
+    [<RequireQualifiedAccess>]
+    type PrefetchConfig =
+        | DefaultToTen
+        | Count of int
+
     type Callbacks =
         { OnReceived: ReceivedMessage -> Async<unit>
           OnRegistered: ConsumerEventArgs Message -> Async<unit>
@@ -66,7 +76,6 @@ module MqClient =
         { withConfirmSelect: bool
           prefetchCount: uint16 }
 
-    type PrefetchCount = PrefetchCount of uint16
 
     let private contentTypeStringFromContent: Content -> string =
         function
@@ -326,6 +335,27 @@ module MqClient =
         fun (Message (event, model)) ->
             model.channelConsumer.Model.BasicNack(deliveryTag = event.DeliveryTag, multiple = false, requeue = false)
 
+    /// <summary>As <see cref="MqClient.ackMessage">ackMessage</see> but wrapped with Async</summary>
+    let ackMessageAsync: ReceivedMessage -> Async<unit> = ackMessage >> Async.singleton
+
+    /// <summary>As <see cref="MqClient.nackMessage">nackMessage</see> but wrapped with Async</summary>
+    let nackMessageAsync: ReceivedMessage -> Async<unit> = nackMessage >> Async.singleton
+
+    /// <summary>As <see cref="MqClient.nackMessageWithoutRequeue">nackMessageWithoutRequeue</see> but wrapped with Async</summary>
+    let nackMessageWithoutRequeueAsync: ReceivedMessage -> Async<unit> =
+        nackMessageWithoutRequeue >> Async.singleton
+
+    let private clamp minValue maxValue value = value |> max minValue |> min maxValue
+
+    let nackMessageWithDelay: System.TimeSpan -> ReceivedMessage -> Async<unit> =
+        fun delay msg ->
+            delay.TotalMilliseconds
+            |> round
+            |> clamp 0.0 (float System.Int32.MaxValue)
+            |> int
+            |> Async.Sleep
+            |> Async.bind (fun () -> nackMessageAsync msg)
+
     let messageBody: ReceivedMessage -> byte [] = fun (Message (event, _)) -> event.Body
 
     let messageBodyAsString: ReceivedMessage -> RawBody =
@@ -334,55 +364,62 @@ module MqClient =
     let messageId: ReceivedMessage -> string =
         fun (Message (event, _)) -> event.BasicProperties.MessageId
 
-    let init: LogError -> string -> System.Uri -> Option<PrefetchCount> -> (Model -> Topology) -> Result<Model, string> =
-        fun logError nameOfClient uri prefetchCountOption getTopology ->
-            let prefetchCount =
-                prefetchCountOption
-                |> Option.map (fun (PrefetchCount prefetchCount) -> prefetchCount)
-                |> Option.defaultValue (uint16 10)
+    let private uint16FromPrefetchConfig: PrefetchConfig -> Result<uint16, string> =
+        fun prefetchCount ->
+            match prefetchCount with
+            | PrefetchConfig.DefaultToTen -> Ok(uint16 10)
+            | PrefetchConfig.Count count ->
+                if count >= 0
+                then Ok(uint16 count)
+                else Error "PrefetchCount value must be a non-negative number"
 
-            connect nameOfClient uri
-            |> Result.bind (fun connection ->
-                let exCallback =
-                    (fun ex context connection ->
-                        logError (ex, "Unhandled exception on channel in context {$c}", context)
-                        closeConnection 3000 connection)
+    let init: LogError -> string -> System.Uri -> PrefetchConfig -> (Model -> Topology) -> Result<Model, string> =
+        fun logError nameOfClient uri prefetchConfig getTopology ->
 
-                createChannel
-                    { withConfirmSelect = true
-                      prefetchCount = prefetchCount } exCallback connection
-                |> Result.bind (fun channel ->
+            prefetchConfig
+            |> uint16FromPrefetchConfig
+            |> Result.bind (fun prefetchCount ->
+                connect nameOfClient uri
+                |> Result.bind (fun connection ->
+                    let exCallback =
+                        (fun ex context connection ->
+                            logError (ex, "Unhandled exception on channel in context {$c}", context)
+                            closeConnection 3000 connection)
+
                     createChannel
-                        { withConfirmSelect = false
+                        { withConfirmSelect = true
                           prefetchCount = prefetchCount } exCallback connection
-                    |> Result.map (fun rpcChannel ->
-                        (connection,
-                         Model
-                             { channelConsumer = AsyncEventingBasicConsumer channel
+                    |> Result.bind (fun channel ->
+                        createChannel
+                            { withConfirmSelect = false
+                              prefetchCount = prefetchCount } exCallback connection
+                        |> Result.map (fun rpcChannel ->
+                            (connection,
+                             Model
+                                 { channelConsumer = AsyncEventingBasicConsumer channel
 
-                               rpcConsumer = AsyncEventingBasicConsumer rpcChannel
+                                   rpcConsumer = AsyncEventingBasicConsumer rpcChannel
 
-                               pendingRequests =
-                                   System.Collections.Concurrent.ConcurrentDictionary<string, Result<ReceivedMessage, string> System.Threading.Tasks.TaskCompletionSource>
-                                       () }))))
-            |> Result.bind (fun (connection, model) ->
-                let declareAQueue = declareQueue model
-                let bindAQueue = bindQueueToExchange model
+                                   pendingRequests =
+                                       System.Collections.Concurrent.ConcurrentDictionary<string, Result<ReceivedMessage, string> System.Threading.Tasks.TaskCompletionSource>
+                                           () }))))
+                |> Result.bind (fun (connection, model) ->
+                    let declareAQueue = declareQueue model
+                    let bindAQueue = bindQueueToExchange model
 
-                let consumeAQueue =
-                    consumeQueue model (System.Guid.NewGuid().ToString())
+                    let consumeAQueue =
+                        consumeQueue model (System.Guid.NewGuid().ToString())
 
-                getTopology model
-                |> List.fold (fun prevResult queueTopology ->
-                    Result.bind (fun _ ->
-                        declareAQueue queueTopology
-                        |> Result.bind bindAQueue
-                        |> Result.map consumeAQueue) prevResult) (Ok model)
-                |> Result.mapError (fun error ->
-                    closeConnection 3000 connection
-                    error)
-                |> Result.map initReplyQueue)
-
+                    getTopology model
+                    |> List.fold (fun prevResult queueTopology ->
+                        Result.bind (fun _ ->
+                            declareAQueue queueTopology
+                            |> Result.bind bindAQueue
+                            |> Result.map consumeAQueue) prevResult) (Ok model)
+                    |> Result.mapError (fun error ->
+                        closeConnection 3000 connection
+                        error)
+                    |> Result.map initReplyQueue))
     /// Will publish with confirm.
     let publishToQueue: Model -> System.TimeSpan -> string -> PublishMessage -> Async<PublishResult> =
         fun (Model model) timeout routingKey message ->
