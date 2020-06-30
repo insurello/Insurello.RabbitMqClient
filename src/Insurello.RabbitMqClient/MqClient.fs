@@ -497,15 +497,14 @@ module MqClient =
             }
 
 
-    let replyToMessage: Model -> ReceivedMessage -> (string * string) list -> Content -> Async<PublishResult> =
+    let replyToMessage: Model -> ReceivedMessage -> Map<string, string> -> Content -> Async<PublishResult> =
         fun (Model model) receivedMessage headers content ->
             receivedMessage
             |> extractReplyProperties
             |> AsyncResult.fromResult
             |> Async.map (function
                 | Ok replyProperties ->
-                    let headers =
-                        Map([ ("sequence_end", "true") ] @ headers) // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
+                    let headers = Map.add "sequence_end" "true" headers // sequence_end is required by Rabbot clients (https://github.com/arobson/rabbot/issues/76)
 
                     let (contentType, body) =
                         match content with
