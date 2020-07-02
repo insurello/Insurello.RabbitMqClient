@@ -187,7 +187,13 @@ module MqClient =
             | :? System.ArgumentException as ex -> Error ex.Message
 
     let private closeConnection: int -> IConnection -> unit =
-        fun timeout connection -> if connection.IsOpen then connection.Close(timeout) else ()
+        fun timeout connection ->
+            if connection.IsOpen then
+                // Connection seems to be locked when this function is called from an exception raised in MqClient.
+                // Make the call asynchrounous so this thread don't block the call.
+                Async.Start(async { connection.Close(timeout) })
+            else
+                ()
 
     let private createChannel: ChannelConfig -> ExceptionCallback -> IConnection -> Result<IModel, string> =
         fun config exCallback connection ->
