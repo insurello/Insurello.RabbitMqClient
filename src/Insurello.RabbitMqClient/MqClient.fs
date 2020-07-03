@@ -187,7 +187,13 @@ module MqClient =
             | :? System.ArgumentException as ex -> Error ex.Message
 
     let private closeConnection: int -> IConnection -> unit =
-        fun timeout connection -> if connection.IsOpen then connection.Close(timeout) else ()
+        fun timeout connection ->
+            if connection.IsOpen then
+                // Connection seems to be locked when this function is called from an exception raised in MqClient.
+                // Make the call asynchrounous so this thread don't block the call.
+                Async.Start(async { connection.Close(timeout) })
+            else
+                ()
 
     let private createChannel: ChannelConfig -> ExceptionCallback -> IConnection -> Result<IModel, string> =
         fun config exCallback connection ->
@@ -597,8 +603,13 @@ module MqClient =
 
                 | :? System.OverflowException as ex -> return Error ex.Message
             }
-
-    let failwithWrapper: LogError -> (ReceivedMessage -> Async<unit>) -> Callbacks =
+    /// <summary>Wrap callbacks with default implementation for OnRegistered,
+    /// OnUnregistered, OnConsumerCancelled, OnShutdown. If any message is recieved
+    /// for OnConsumerCancelled or OnShutdown the system will exit with error code 9</summary>
+    /// <param name="LogError">Logger.</param>
+    /// <param name="ReceivedMessage">Callback that's called when a new message is recieved.</param>
+    /// <returns>Callbacks</returns>
+    let terminateOnFailureWrapper: LogError -> (ReceivedMessage -> Async<unit>) -> Callbacks =
         fun logError onReceived ->
             { OnReceived =
                   fun message ->
@@ -610,13 +621,22 @@ module MqClient =
                               do! onReceived message
                           with exn ->
                               logError (exn, (sprintf "💥 Unexpected error. %A\nShutting down" exn), ())
-                              exit 2
+                              exit 9
                       }
 
               OnRegistered = fun _ -> Async.singleton ()
 
-              OnUnregistered = fun _ -> failwith "Got OnUnregistered event"
+              OnUnregistered =
+                  fun _ ->
+                      logError (null, "Got OnUnregistered event", ())
+                      exit 9
 
-              OnConsumerCancelled = fun _ -> failwith "Got OnConsumerCancelled event"
+              OnConsumerCancelled =
+                  fun _ ->
+                      logError (null, "Got OnConsumerCancelled event", ())
+                      exit 9
 
-              OnShutdown = fun _ -> failwith "Got OnShutdown event" }
+              OnShutdown =
+                  fun _ ->
+                      logError (null, "Got OnShutdown event", ())
+                      exit 9 }
