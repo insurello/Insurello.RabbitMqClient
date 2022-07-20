@@ -353,14 +353,14 @@ module MqClient =
 
             model.rpcConsumer.Model.BasicConsume(
                 queue = queueName,
-                autoAck = true,
+                autoAck = true, // Must be true for direct-reply-to
                 consumerTag = consumerTag,
                 noLocal = false,
                 exclusive = false,
                 arguments = null,
                 consumer = model.rpcConsumer
             )
-            |> ignore // Must be true for direct-reply-to
+            |> ignore
 
             Model model
 
