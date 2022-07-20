@@ -735,11 +735,9 @@ module MqClient =
               OnConsumerCancelled =
                   fun _ ->
                       logError (null, "Got OnConsumerCancelled event", ())
-                      Async.singleton ()
-              // exit 9
+                      exit 9
 
               OnShutdown =
                   fun _ ->
                       logError (null, "Got OnShutdown event", ())
-                      Async.singleton () }
-//exit 9 }
+                      exit 9 }
