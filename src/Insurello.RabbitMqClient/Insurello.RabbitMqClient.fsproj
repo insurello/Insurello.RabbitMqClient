@@ -18,11 +18,18 @@
     <!-- Include PDB in the main package as current tooling is lacking.
          Shall be removed in the future when tooling has catched up. -->
     <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    
+    <EmbedSources>true</EmbedSources>
+
+    <!-- Embed symbols containing Source Link in the main file (exe/dll) -->
+    <DebugType>embedded</DebugType>
   </PropertyGroup>
 
-  <!-- Source Link repo configuration -->
   <ItemGroup>
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.0.0" PrivateAssets="All"/>
+    <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink.
+         It's only used while building. -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
