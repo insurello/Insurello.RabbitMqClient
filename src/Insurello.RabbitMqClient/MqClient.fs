@@ -221,6 +221,9 @@ module MqClient =
             else
                 ()
 
+    /// <summary>
+    /// Gracefully closes the connection, the channel consumer and the rpc consumer.
+    /// </summary>
     let close: Model -> unit =
         fun (Model model) ->
             // User has requested a graceful close. This will trigger callbacks that could lead to unexpected
