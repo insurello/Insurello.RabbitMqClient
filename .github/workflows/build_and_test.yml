@@ -15,24 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v2
 
-      - name: Setup .NET Core
-        uses: actions/setup-dotnet@v1
+      - uses: actions/setup-dotnet@v1
         with:
-          dotnet-version: 3.1.101
+          dotnet-version: "6.0.202"
 
-      - name: dotnet restore
-        env:
-          DOTNET_NOLOGO: true
-        run: |
+      - run: |
           dotnet restore
           dotnet tool restore
+        env:
+          DOTNET_NOLOGO: true
 
-      - name: fantomas
-        run: |
-          dotnet tool run fantomas -- --check --recurse src/
-
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
-
-      - name: Test
-        run: dotnet test --no-restore --verbosity normal
+      - run: dotnet fantomas -- --check --recurse src/
+      - run: dotnet build --configuration Release --no-restore -warnaserror
+      - run: dotnet test --no-build

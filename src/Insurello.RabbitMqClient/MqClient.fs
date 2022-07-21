@@ -733,14 +733,14 @@ module MqClient =
               OnUnregistered =
                   fun _ ->
                       logError (null, "Got OnUnregistered event", ())
-                      exit 9
+                      exit 10
 
               OnConsumerCancelled =
                   fun _ ->
                       logError (null, "Got OnConsumerCancelled event", ())
-                      exit 9
+                      exit 11
 
               OnShutdown =
                   fun _ ->
                       logError (null, "Got OnShutdown event", ())
-                      exit 9 }
+                      exit 12 }
