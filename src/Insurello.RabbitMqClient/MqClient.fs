@@ -453,6 +453,8 @@ module MqClient =
     let messageBodyAsString: ReceivedMessage -> RawBody =
         messageBody >> System.Text.Encoding.UTF8.GetString
 
+    /// <summary>Given a ReceivedMessage and a `key` tries to find the Header value and convert it to a string.</summary>
+    /// <returns>GetHeaderResult</returns>
     let getHeaderAsString: ReceivedMessage -> string -> GetHeaderResult =
         fun receivedMessage key ->
             match receivedMessage with
@@ -466,9 +468,9 @@ module MqClient =
                         match object with
                         | :? array<byte> as byteArray ->
                             try
-                                GetHeaderResult.StringValue(sprintf $"%s{System.Text.Encoding.UTF8.GetString byteArray}")
+                                GetHeaderResult.StringValue(System.Text.Encoding.UTF8.GetString byteArray)
                             with
-                            | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a string"
+                            | ex -> GetHeaderResult.ErrorConvertingHeaderValueToString ($"Couldn't convert to string. Reason: %s{ex.Message}")
                         | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a byte array"
                     | None -> GetHeaderResult.NotFound
 
