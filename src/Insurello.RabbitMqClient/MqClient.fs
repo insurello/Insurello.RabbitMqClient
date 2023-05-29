@@ -470,7 +470,10 @@ module MqClient =
                             try
                                 GetHeaderResult.StringValue(System.Text.Encoding.UTF8.GetString byteArray)
                             with
-                            | ex -> GetHeaderResult.ErrorConvertingHeaderValueToString ($"Couldn't convert to string. Reason: %s{ex.Message}")
+                            | ex ->
+                                GetHeaderResult.ErrorConvertingHeaderValueToString(
+                                    $"Couldn't convert to string. Reason: %s{ex.Message}"
+                                )
                         | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a byte array"
                     | None -> GetHeaderResult.NotFound
 
