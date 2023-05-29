@@ -25,6 +25,12 @@ module MqClient =
 
     type Model = private Model of ModelData
 
+    [<RequireQualifiedAccess>]
+    type GetHeaderResult =
+        | StringValue of string
+        | NotFound
+        | ErrorConvertingHeaderValueToString of string
+
     /// <summary>
     /// The maximum number of MQ messages to be fetched from queues and get processed at a time by the RabbitMQ client.
     /// We recommend setting it to DefaultToTen if you don't know what you are doing.
@@ -446,6 +452,30 @@ module MqClient =
 
     let messageBodyAsString: ReceivedMessage -> RawBody =
         messageBody >> System.Text.Encoding.UTF8.GetString
+
+    /// <summary>Given a ReceivedMessage and a `key` tries to find the Header value and convert it to a string.</summary>
+    /// <returns>GetHeaderResult</returns>
+    let getHeaderAsString: ReceivedMessage -> string -> GetHeaderResult =
+        fun receivedMessage key ->
+            match receivedMessage with
+            | Message (basicDeliverEventArgs, _) ->
+                basicDeliverEventArgs.BasicProperties.Headers
+                |> Seq.map (|KeyValue|)
+                |> Map.ofSeq
+                |> Map.tryFind key
+                |> function
+                    | Some (object: obj) ->
+                        match object with
+                        | :? array<byte> as byteArray ->
+                            try
+                                GetHeaderResult.StringValue(System.Text.Encoding.UTF8.GetString byteArray)
+                            with
+                            | ex ->
+                                GetHeaderResult.ErrorConvertingHeaderValueToString(
+                                    $"Couldn't convert to string. Reason: %s{ex.Message}"
+                                )
+                        | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a byte array"
+                    | None -> GetHeaderResult.NotFound
 
     let messageId: ReceivedMessage -> string =
         fun (Message (event, _)) -> event.BasicProperties.MessageId
