@@ -26,7 +26,7 @@ module MqClient =
     type Model = private Model of ModelData
 
     [<RequireQualifiedAccess>]
-    type HeaderResult =
+    type GetHeaderResult =
         | StringValue of string
         | NotFound
         | ErrorConvertingHeaderValueToString of string
@@ -453,7 +453,7 @@ module MqClient =
     let messageBodyAsString: ReceivedMessage -> RawBody =
         messageBody >> System.Text.Encoding.UTF8.GetString
 
-    let getHeaderAsString: ReceivedMessage -> string -> HeaderResult =
+    let getHeaderAsString: ReceivedMessage -> string -> GetHeaderResult =
         fun receivedMessage key ->
             match receivedMessage with
             | Message (basicDeliverEventArgs, _) ->
@@ -466,14 +466,11 @@ module MqClient =
                         match object with
                         | :? array<byte> as byteArray ->
                             try
-                                let string = System.Text.Encoding.UTF8.GetString byteArray
-
-                                printfn $"Got header: %A{string}"
-                                HeaderResult.StringValue(sprintf $"%s{string}")
+                                GetHeaderResult.StringValue(sprintf $"%s{System.Text.Encoding.UTF8.GetString byteArray}")
                             with
-                            | _ -> HeaderResult.ErrorConvertingHeaderValueToString "Not a string"
-                        | _ -> HeaderResult.ErrorConvertingHeaderValueToString "Not a byte array"
-                    | None -> HeaderResult.NotFound
+                            | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a string"
+                        | _ -> GetHeaderResult.ErrorConvertingHeaderValueToString "Not a byte array"
+                    | None -> GetHeaderResult.NotFound
 
     let messageId: ReceivedMessage -> string =
         fun (Message (event, _)) -> event.BasicProperties.MessageId
