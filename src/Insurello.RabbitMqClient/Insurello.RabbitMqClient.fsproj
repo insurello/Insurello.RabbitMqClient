@@ -33,4 +33,12 @@
     <PackageReference Include="Insurello.AsyncExtra" Version="3.0.0" />
     <PackageReference Include="RabbitMq.Client" Version="5.1.2" />
   </ItemGroup>
+  
+  <ItemGroup>
+    <!-- Pin FSharp.Core package to minimum supported 6.0.0
+     https://github.com/dotnet/fsharp/blob/main/docs/fsharp-core-notes.md
+     -->
+    <PackageReference Update="FSharp.Core" Version="6.0.0" />
+  </ItemGroup>
+
 </Project>
