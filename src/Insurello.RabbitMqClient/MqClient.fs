@@ -393,13 +393,20 @@ module MqClient =
                 else
                     ())
 
+    /// <summary>Returns true if the publishSeqNo is confirmed.</summary>
+    /// <param name="multipleConfirms">If false, only one message is confirmed, if true, all messages with a lower or equal sequence number are confirmed.</param>
+    let private isConfirmed (publishSeqNo: uint64) (deliveredPublishSeqNo: uint64) (multipleConfirms: bool) : bool =
+        publishSeqNo = deliveredPublishSeqNo
+        || multipleConfirms
+           && publishSeqNo < deliveredPublishSeqNo
+
     let private createBasicAckEventHandler: uint64
         -> System.Threading.Tasks.TaskCompletionSource<PublishResult>
         -> System.EventHandler<BasicAckEventArgs> =
         fun publishSeqNo tcs ->
             System.EventHandler<BasicAckEventArgs> (fun _ args ->
-                if args.DeliveryTag = publishSeqNo then
-                    tcs.TrySetResult(PublishResult.Acked) |> ignore
+                if isConfirmed publishSeqNo args.DeliveryTag args.Multiple then
+                    tcs.TrySetResult PublishResult.Acked |> ignore
                 else
                     ())
 
@@ -408,8 +415,8 @@ module MqClient =
         -> System.EventHandler<BasicNackEventArgs> =
         fun publishSeqNo tcs ->
             System.EventHandler<BasicNackEventArgs> (fun _ args ->
-                if args.DeliveryTag = publishSeqNo then
-                    tcs.TrySetResult(PublishResult.Nacked) |> ignore
+                if isConfirmed publishSeqNo args.DeliveryTag args.Multiple then
+                    tcs.TrySetResult PublishResult.Nacked |> ignore
                 else
                     ())
 
