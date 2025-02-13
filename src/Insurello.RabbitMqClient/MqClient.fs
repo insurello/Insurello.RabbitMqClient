@@ -54,7 +54,12 @@ module MqClient =
         { Queue: string
           BindToExchange: string option
           ConsumeCallbacks: Callbacks
-          MessageTimeToLive: int option }
+          MessageTimeToLive: int option
+          QueueType: QueueType }
+
+    and QueueType =
+        | Classic
+        | Quorum
 
     [<RequireQualifiedAccessAttribute>]
     type PublishResult =
@@ -273,9 +278,9 @@ module MqClient =
             let arguments =
                 dict (
                     [ "x-queue-type",
-                      (match queueTopology.BindToExchange with
-                       | Some _ -> "quorum"
-                       | None -> "classic")
+                      (match queueTopology.QueueType with
+                       | Quorum -> "quorum"
+                       | Classic -> "classic")
                       :> obj ]
                     @ (queueTopology.MessageTimeToLive
                        |> Option.map (fun ttl -> [ ("x-message-ttl", ttl :> obj) ])
