@@ -272,9 +272,14 @@ module MqClient =
 
             let arguments =
                 dict (
-                    queueTopology.MessageTimeToLive
-                    |> Option.map (fun ttl -> [ ("x-message-ttl", ttl :> obj) ])
-                    |> Option.defaultValue []
+                    [ "x-queue-type",
+                      (match queueTopology.BindToExchange with
+                       | Some _ -> "quorum"
+                       | None -> "classic")
+                      :> obj ]
+                    @ (queueTopology.MessageTimeToLive
+                       |> Option.map (fun ttl -> [ ("x-message-ttl", ttl :> obj) ])
+                       |> Option.defaultValue [])
                 )
 
             try
