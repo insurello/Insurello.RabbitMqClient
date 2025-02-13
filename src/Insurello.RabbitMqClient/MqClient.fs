@@ -54,7 +54,10 @@ module MqClient =
         { Queue: string
           BindToExchange: string option
           ConsumeCallbacks: Callbacks
-          MessageTimeToLive: int option }
+          MessageTimeToLive: int option
+          QueueType: QueueType }
+        
+    and QueueType = | Classic | Quorum
 
     [<RequireQualifiedAccessAttribute>]
     type PublishResult =
