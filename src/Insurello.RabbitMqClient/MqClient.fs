@@ -104,8 +104,6 @@ module MqClient =
     type ConnectionConfig = {
         connectionName: string
         endpoints: List<AmqpTcpEndpoint>
-        username: string
-        password: string
         onConnectionShutdown: OnConnectionShutdown
     }
 
@@ -249,10 +247,7 @@ module MqClient =
                         AutomaticRecoveryEnabled = false,
 
                         RequestedHeartbeat = System.TimeSpan.FromSeconds 15.,
-                        VirtualHost = "quorum-vhost",
-
-                        UserName = connectionConfig.username,
-                        Password = connectionConfig.password
+                        VirtualHost = "quorum-vhost"
                     )
 
                 let! connection =
