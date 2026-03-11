@@ -31,7 +31,8 @@
 
   <ItemGroup>
     <PackageReference Include="Insurello.AsyncExtra" Version="3.0.0" />
-    <PackageReference Include="RabbitMq.Client" Version="5.1.2" />
+    <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
+    <PackageReference Include="Serilog.Extensions.Logging" Version="9.0.2" />
   </ItemGroup>
   
   <ItemGroup>
