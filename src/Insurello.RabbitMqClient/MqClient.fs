@@ -237,7 +237,7 @@ module MqClient =
                     event.replyText
                 )
 
-                exit 13 // TODO: 13?
+                exit 13
 
     let private connect (connectionConfig: ConnectionConfig) : Async<Result<IConnection, string>> =
         task {
@@ -258,8 +258,6 @@ module MqClient =
 
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
-                        printfn $"Got ConnectionShutdownAsync event with eventArgs: {eventArgs.ReplyCode}"
-
                         connectionConfig.onConnectionShutdown
                             { connectionName = connectionConfig.connectionName
                               replyCode = int eventArgs.ReplyCode
@@ -658,15 +656,9 @@ module MqClient =
                             Ok(
                                 model,
                                 (fun () ->
-                                    printfn "Calling -> connection.AbortAsync connectionCloseTimeout"
-
                                     connection.AbortAsync connectionCloseTimeout
                                     |> Async.AwaitTask
-                                    |> Async.RunSynchronously
-
-                                    printfn "Done -> connection.AbortAsync connectionCloseTimeout"
-
-                                    )
+                                    |> Async.RunSynchronously)
                             ))
                     )))
 
