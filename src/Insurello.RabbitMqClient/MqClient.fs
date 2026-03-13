@@ -902,7 +902,6 @@ module MqClient =
               OnUnregistered =
 
                   fun event ->
-                      printfn $"{name} OnUnregistered"
                       // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
                       if event.replyCode <> Constants.ReplySuccess then
                           logger.LogError(
@@ -921,7 +920,6 @@ module MqClient =
 
               OnShutdown =
                   fun event ->
-                      printfn $"{name} OnShutdown"
                       // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
                       if event.replyCode <> Constants.ReplySuccess then
                           logger.LogError(
