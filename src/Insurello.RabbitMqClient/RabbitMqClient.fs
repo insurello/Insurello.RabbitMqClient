@@ -129,7 +129,7 @@ module Consumer =
 
     and ReplyBody =
         | Json of string
-        | Binary of byte array
+        | Binary of byte[]
 
     let ackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
         consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
