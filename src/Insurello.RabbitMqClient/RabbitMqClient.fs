@@ -639,3 +639,99 @@ module RPC =
                 | _ -> None
 
             | _ -> None
+
+module Publish =
+    type PublishMessage = {
+        queue: string
+        headers: List<string * string>
+        body: PublishMessageBody
+        timeout: System.TimeSpan
+    }
+
+    // TODO: Share with RPC?
+    and PublishMessageBody = Json of string
+
+    type PublishAsync = PublishMessage -> Async<Result<unit, string>>
+
+    type Client = { publishAsync: PublishAsync }
+
+    // References:
+    // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
+    // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/main/projects/Applications/PublisherConfirms/PublisherConfirms.cs
+    // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/main/Program.cs
+    let private publicAsync (clientName: string) (channel: IChannel) : PublishAsync =
+        fun message ->
+            task {
+                let messageId = System.Guid.NewGuid().ToString ()
+
+                let contentType, publishBody =
+                    match message.body with
+                    | Json jsonString -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonString
+
+                // The IDictionary implementation must be mutable due to we're using `publisherConfirmationTrackingEnabled`
+                // which adds the header `x-dotnet-pub-seq-no` in the `BasicPublishAsync` call.
+                let requestHeaders =
+                    message.headers
+                    |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                    |> System.Collections.Generic.Dictionary
+
+                try
+                    use cts = new System.Threading.CancellationTokenSource (message.timeout)
+
+                    do!
+                        channel.BasicPublishAsync (
+                            exchange = "",
+                            routingKey = message.queue,
+                            body = publishBody,
+                            mandatory = true, // If queue doesn't exist at the broker, a "basic return" is replied.
+                            basicProperties =
+                                BasicProperties (
+                                    ContentType = contentType,
+                                    Persistent = true,
+                                    MessageId = messageId,
+                                    Headers = requestHeaders
+                                ),
+                            cancellationToken = cts.Token
+                        )
+
+                    return Ok ()
+
+                with exn ->
+                    return Error $"%s{clientName}: Publish exception. Details: %s{string exn}"
+            }
+            |> Async.AwaitTask
+
+    let initAsync
+        (logger: ILogger)
+        (clientName: string)
+        (Connection connection: Connection)
+        : Async<Result<Client, string>> =
+        task {
+            try
+                let! channel =
+                    connection.CreateChannelAsync (
+                        CreateChannelOptions (
+                            publisherConfirmationsEnabled = true,
+                            publisherConfirmationTrackingEnabled = true
+                        )
+                    )
+
+                channel.add_CallbackExceptionAsync (fun _ eventArgs ->
+                    task {
+                        let reason = $"%s{clientName}: Unhandled channel exception, closing connection"
+
+                        logger.LogError (eventArgs.Exception, reason)
+
+                        do! connection.AbortAsync (uint16 Constants.ChannelError, reason, connectionCloseTimeout)
+                    }
+                )
+
+                return
+                    Ok {
+                        publishAsync = publicAsync clientName channel
+                    }
+
+            with exn ->
+                return Error (string exn)
+        }
+        |> Async.AwaitTask
