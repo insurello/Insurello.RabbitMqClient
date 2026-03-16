@@ -127,7 +127,9 @@ module Consumer =
         body: ReplyBody
     }
 
-    and ReplyBody = Json of string
+    and ReplyBody =
+        | Json of string
+        | Binary of byte array
 
     let ackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
         consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
@@ -180,6 +182,7 @@ module Consumer =
                     let contentType, body =
                         match replyMessage.body with
                         | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
+                        | Binary data -> "application/octet-stream", data
 
                     let publishWithHeaders =
                         // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
