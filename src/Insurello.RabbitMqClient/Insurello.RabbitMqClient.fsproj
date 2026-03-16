@@ -1,7 +1,7 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
     <PackageId>Insurello.RabbitMqClient</PackageId>
     <Authors>Insurello</Authors>
     <Company>Insurello</Company>
@@ -22,24 +22,16 @@
   <ItemGroup>
     <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink.
          It's only used while building. -->
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.201" PrivateAssets="All" />
   </ItemGroup>
 
   <ItemGroup>
-    <Compile Include="MqClient.fs" />
+    <Compile Include="RabbitMqClient.fs" />
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Insurello.AsyncExtra" Version="3.0.0" />
     <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
-    <PackageReference Include="Serilog.Extensions.Logging" Version="9.0.2" />
-  </ItemGroup>
-  
-  <ItemGroup>
-    <!-- Pin FSharp.Core package to minimum supported 6.0.0
-     https://github.com/dotnet/fsharp/blob/main/docs/fsharp-core-notes.md
-     -->
-    <PackageReference Update="FSharp.Core" Version="6.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
   </ItemGroup>
 
 </Project>
