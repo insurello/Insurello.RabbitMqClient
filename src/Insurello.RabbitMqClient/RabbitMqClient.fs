@@ -385,11 +385,7 @@ module RPC =
     open System.Threading
     open System.Collections.Concurrent
 
-    type Client = { requestAsync: RequestAsync }
-
-    and RequestAsync = RequestMessage -> Async<Result<ResponseMessage, string>>
-
-    and RequestMessage = {
+    type RequestMessage = {
         queue: string
         headers: List<string * string>
         body: RequestBody
@@ -398,20 +394,40 @@ module RPC =
 
     and RequestBody = Json of string
 
-    and ResponseMessage = {
+    type ResponseHeaders = System.Collections.Generic.IDictionary<string, obj>
+
+    type RawResponseMessage = {
+        body: byte[]
+        headers: ResponseHeaders
+    }
+
+    type ResponseMessage = {
         body: string
-        headers: System.Collections.Generic.IDictionary<string, obj>
+        headers: ResponseHeaders
+    }
+
+    type RequestRawAsync = RequestMessage -> Async<Result<RawResponseMessage, string>>
+
+    type RequestAsync = RequestMessage -> Async<Result<ResponseMessage, string>>
+
+    type Client = {
+        requestRawAsync: RequestRawAsync
+        requestAsync: RequestAsync
     }
 
     type private CorrelationId = string
 
     type private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<ResponseMessage, string>>>
+        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<BasicDeliverEventArgs, string>>>
 
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
 
-    let private requestAsync (pendingRequests: PendingRequests) (consumer: AsyncEventingBasicConsumer) : RequestAsync =
+    let private requestRawAsync<'response>
+        (pendingRequests: PendingRequests)
+        (consumer: AsyncEventingBasicConsumer)
+        (mapResponse: ResponseHeaders -> System.ReadOnlyMemory<byte> -> 'response)
+        : RequestMessage -> Async<Result<'response, string>> =
         fun message ->
             task {
                 let messageId = System.Guid.NewGuid().ToString ()
@@ -464,7 +480,9 @@ module RPC =
                                 body = requestBody
                             )
 
-                        return! completionSource.Task
+                        match! completionSource.Task with
+                        | Error error -> return Error error
+                        | Ok response -> return Ok (mapResponse response.BasicProperties.Headers response.Body)
 
                     else
                         return Error $"RabbitMqClient.RPC.request: Duplicate message id %s{messageId}"
@@ -510,12 +528,7 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            let responseMessage: ResponseMessage = {
-                                body = System.Text.Encoding.UTF8.GetString eventArgs.Body.Span
-                                headers = eventArgs.BasicProperties.Headers
-                            }
-
-                            if not (tcs.TrySetResult (Ok responseMessage)) then
+                            if not (tcs.TrySetResult (Ok eventArgs)) then
                                 logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
                                     clientName,
@@ -587,10 +600,39 @@ module RPC =
 
                 return
                     Ok {
-                        requestAsync = requestAsync pendingRequests consumer
+                        requestRawAsync =
+                            requestRawAsync
+                                pendingRequests
+                                consumer
+                                (fun headers body -> {
+                                    headers = headers
+                                    body = body.ToArray ()
+                                })
+
+                        requestAsync =
+                            requestRawAsync
+                                pendingRequests
+                                consumer
+                                (fun headers body -> {
+                                    headers = headers
+                                    body = System.Text.Encoding.UTF8.GetString body.Span
+                                })
                     }
 
             with exn ->
                 return Error (string exn)
         }
         |> Async.AwaitTask
+
+    module ResponseHeaders =
+        let inline has (key: string) (headers: ResponseHeaders) = headers.ContainsKey key
+
+        let string (key: string) (headers: ResponseHeaders) : Option<string> =
+            match headers.TryGetValue key with
+            | true, objectValue ->
+                match objectValue with
+                | :? System.ReadOnlyMemory<byte> as bytes -> Some (System.Text.Encoding.UTF8.GetString bytes.Span)
+
+                | _ -> None
+
+            | _ -> None
