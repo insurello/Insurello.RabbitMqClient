@@ -3,28 +3,28 @@ name: Build and Test
 on:
   push:
     branches:
-      - '*'
+      - "*"
   pull_request:
-    branches: [ master ]
+    branches: [master]
 
 jobs:
   build:
     name: Build and test
     runs-on: ubuntu-latest
+    env:
+      DOTNET_NOLOGO: true
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-dotnet@v1
+      - uses: actions/setup-dotnet@v5
         with:
-          dotnet-version: "6.0.202"
+          global-json-file: global.json
 
-      - run: |
-          dotnet restore
+      - name: fantomas
+        run: |
           dotnet tool restore
-        env:
-          DOTNET_NOLOGO: true
+          dotnet fantomas --check src/
 
-      - run: dotnet fantomas -- --check --recurse src/
-      - run: dotnet build --configuration Release --no-restore -warnaserror
-      - run: dotnet test --no-build
+      - run: dotnet restore
+      - run: dotnet build --configuration Release --no-restore --warnaserror

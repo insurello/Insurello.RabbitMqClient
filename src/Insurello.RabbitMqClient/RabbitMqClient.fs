@@ -13,10 +13,11 @@ module Connection =
 
     type OnConnectionShutdown = OnConnectionShutdownEvent -> unit
 
-    and OnConnectionShutdownEvent =
-        { connectionName: string
-          replyCode: int
-          replyText: string }
+    and OnConnectionShutdownEvent = {
+        connectionName: string
+        replyCode: int
+        replyText: string
+    }
 
     type CloseConnection = unit -> unit
 
@@ -25,7 +26,7 @@ module Connection =
         vhost: string
         endpoints: List<System.Uri>
     }
-    
+
     let initAsync
         (connectionConfig: ConnectionConfig)
         (onConnectionShutdown: OnConnectionShutdown)
@@ -33,37 +34,40 @@ module Connection =
         task {
             try
                 let factory =
-                    ConnectionFactory(
+                    ConnectionFactory (
                         AutomaticRecoveryEnabled = false,
                         RequestedHeartbeat = System.TimeSpan.FromSeconds 15.,
                         VirtualHost = connectionConfig.vhost
                     )
 
                 let! connection =
-                    factory.CreateConnectionAsync(
+                    factory.CreateConnectionAsync (
                         endpoints = List.map AmqpTcpEndpoint connectionConfig.endpoints,
                         clientProvidedName = connectionConfig.name
                     )
 
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
-                        onConnectionShutdown
-                            { connectionName = connectionConfig.name
-                              replyCode = int eventArgs.ReplyCode
-                              replyText = eventArgs.ReplyText }
-                    })
+                        onConnectionShutdown {
+                            connectionName = connectionConfig.name
+                            replyCode = int eventArgs.ReplyCode
+                            replyText = eventArgs.ReplyText
+                        }
+                    }
+                )
 
                 return
-                    Ok(
+                    Ok (
                         Connection connection,
                         (fun () ->
                             connection.AbortAsync connectionCloseTimeout
                             |> Async.AwaitTask
-                            |> Async.RunSynchronously)
+                            |> Async.RunSynchronously
+                        )
                     )
 
-            with
-            | exn -> return Error $"%s{connectionConfig.name}: Failed to connect to RabbitMQ: %s{string exn}"
+            with exn ->
+                return Error $"%s{connectionConfig.name}: Failed to connect to RabbitMQ: %s{string exn}"
         }
         |> Async.AwaitTask
 
@@ -72,10 +76,10 @@ module Connection =
         fun event ->
             // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
             if event.replyCode = Constants.ReplySuccess then
-                logger.LogWarning("Closing RabbitMQ connection {connectionName}", event.connectionName)
+                logger.LogWarning ("Closing RabbitMQ connection {connectionName}", event.connectionName)
 
             else if event.replyCode <> Constants.ReplySuccess then
-                logger.LogError(
+                logger.LogError (
                     "Got unexpected event `Shutdown` on connection {connectionName}. {replyCode} - {replyText}. Will terminate the process",
                     event.connectionName,
                     event.replyCode,
@@ -90,62 +94,54 @@ module Consumer =
 
     type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * AsyncEventingBasicConsumer
 
-    type Callbacks =
-        { onReceived: ReceivedMessage -> Async<unit>
-          onRegistered: string -> unit
-          onUnregistered: UnregisteredEvent -> unit
-          onShutdown: UnregisteredEvent -> unit }
+    type Callbacks = {
+        onReceived: ReceivedMessage -> Async<unit>
+        onRegistered: string -> unit
+        onUnregistered: UnregisteredEvent -> unit
+        onShutdown: UnregisteredEvent -> unit
+    }
 
-    and UnregisteredEvent =
-        { queueName: string
-          replyCode: int
-          replyText: string }
+    and UnregisteredEvent = {
+        queueName: string
+        replyCode: int
+        replyText: string
+    }
 
-    and QueueConfig =
-        { queueName: string
-          bindToExchange: Option<string>
-          callbacks: Callbacks
-          messageTimeToLive: Option<int>
-          /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
-          prefetchCount: uint16
-          queueType: QueueType }
+    and QueueConfig = {
+        queueName: string
+        bindToExchange: Option<string>
+        callbacks: Callbacks
+        messageTimeToLive: Option<int>
+        /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
+        prefetchCount: uint16
+        queueType: QueueType
+    }
 
     and QueueType =
         | Quorum
         /// Deprecated. Use `Quorum` instead.
         | Classic
 
-
-    type ReplyMessage =
-        { headers: List<string * string>
-          body: ReplyBody }
+    type ReplyMessage = {
+        headers: List<string * string>
+        body: ReplyBody
+    }
 
     and ReplyBody = Json of string
 
     let ackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
-        consumer
-            .Channel
-            .BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false)
-            .AsTask()
+        consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
         |> Async.AwaitTask
 
     let nackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
-        consumer
-            .Channel
-            .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
-            .AsTask()
+        consumer.Channel.BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true).AsTask ()
         |> Async.AwaitTask
 
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
     let private nackWithDelayBlockingAsync (delay: System.TimeSpan) : ReceivedMessage -> Async<unit> =
         fun message ->
             async {
-                do!
-                    Async.Sleep(
-                        int delay.TotalMilliseconds
-                        |> max 0
-                        |> min System.Int32.MaxValue
-                    )
+                do! Async.Sleep (int delay.TotalMilliseconds |> max 0 |> min System.Int32.MaxValue)
 
                 return! nackAsync message
             }
@@ -156,9 +152,7 @@ module Consumer =
             async {
                 // `StartChild` means we share the same `cancellation token`,
                 // so any exceptions should be propagated back to this call.
-                let! _ =
-                    nackWithDelayBlockingAsync delay message
-                    |> Async.StartChild
+                let! _ = nackWithDelayBlockingAsync delay message |> Async.StartChild
 
                 return ()
             }
@@ -181,7 +175,7 @@ module Consumer =
                 | _, null -> return Error "Missing message_id property."
 
                 | replyTo, correlationId ->
-                    let messageId = System.Guid.NewGuid().ToString()
+                    let messageId = System.Guid.NewGuid().ToString ()
 
                     let contentType, body =
                         match replyMessage.body with
@@ -194,14 +188,14 @@ module Consumer =
                         |> dict
 
                     do!
-                        consumer.Channel.BasicPublishAsync(
+                        consumer.Channel.BasicPublishAsync (
                             exchange = "",
                             routingKey = replyTo,
                             // mandatory should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations)
                             // which is a very common use case for replies.
                             mandatory = false,
                             basicProperties =
-                                BasicProperties(
+                                BasicProperties (
                                     ContentType = contentType,
                                     Persistent = true,
                                     MessageId = messageId,
@@ -211,10 +205,10 @@ module Consumer =
                             body = body
                         )
 
-                    return Ok()
+                    return Ok ()
 
-            with
-            | exn -> return Error(string exn)
+            with exn ->
+                return Error (string exn)
         }
         |> Async.AwaitTask
 
@@ -223,22 +217,23 @@ module Consumer =
     let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<Model, string>> =
         task {
             try
-                let! channel = connection.CreateChannelAsync()
+                let! channel = connection.CreateChannelAsync ()
 
-                do! channel.BasicQosAsync(uint32 0, config.prefetchCount, false)
+                do! channel.BasicQosAsync (uint32 0, config.prefetchCount, false)
 
                 channel.add_CallbackExceptionAsync (fun _ _ ->
                     task {
                         do!
-                            connection.AbortAsync(
+                            connection.AbortAsync (
                                 uint16 Constants.ChannelError,
                                 "RabbitMqClient.Consumer: Unhandled channel exception, closing connection",
                                 connectionCloseTimeout
                             )
-                    })
+                    }
+                )
 
                 let! _ =
-                    channel.QueueDeclareAsync(
+                    channel.QueueDeclareAsync (
                         queue = config.queueName,
                         durable = true,
                         exclusive = false,
@@ -258,7 +253,7 @@ module Consumer =
 
                 if Option.isSome config.bindToExchange then
                     do!
-                        channel.QueueBindAsync(
+                        channel.QueueBindAsync (
                             queue = config.queueName,
                             exchange = config.bindToExchange.Value,
                             routingKey = "*",
@@ -268,47 +263,51 @@ module Consumer =
                 let consumer = AsyncEventingBasicConsumer channel
 
                 let consumerTag =
-                    $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString()}"
+                    $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
                 consumer.add_ReceivedAsync (fun _ event ->
                     task {
                         if event.ConsumerTag = consumerTag then
-                            do! config.callbacks.onReceived (ReceivedMessage(event, consumer))
-                    })
+                            do! config.callbacks.onReceived (ReceivedMessage (event, consumer))
+                    }
+                )
 
                 consumer.add_RegisteredAsync (fun _ eventArgs ->
                     task {
-                        if eventArgs.ConsumerTags
-                           |> Array.contains consumerTag then
+                        if eventArgs.ConsumerTags |> Array.contains consumerTag then
                             config.callbacks.onRegistered config.queueName
-                    })
+                    }
+                )
 
                 consumer.add_UnregisteredAsync (fun _ eventArgs ->
                     task {
-                        if eventArgs.ConsumerTags
-                           |> Array.contains consumerTag then
+                        if eventArgs.ConsumerTags |> Array.contains consumerTag then
                             let replyCode, replyText =
                                 if consumer.ShutdownReason = null then
                                     0, "Missing ShutdownReason. Did the queue got deleted?"
                                 else
                                     int consumer.ShutdownReason.ReplyCode, consumer.ShutdownReason.ReplyText
 
-                            config.callbacks.onUnregistered
-                                { queueName = config.queueName
-                                  replyCode = replyCode
-                                  replyText = replyText }
-                    })
+                            config.callbacks.onUnregistered {
+                                queueName = config.queueName
+                                replyCode = replyCode
+                                replyText = replyText
+                            }
+                    }
+                )
 
                 consumer.add_ShutdownAsync (fun _ eventArgs ->
                     task {
-                        config.callbacks.onShutdown
-                            { queueName = config.queueName
-                              replyCode = int eventArgs.ReplyCode
-                              replyText = eventArgs.ReplyText }
-                    })
+                        config.callbacks.onShutdown {
+                            queueName = config.queueName
+                            replyCode = int eventArgs.ReplyCode
+                            replyText = eventArgs.ReplyText
+                        }
+                    }
+                )
 
                 let! _ =
-                    channel.BasicConsumeAsync(
+                    channel.BasicConsumeAsync (
                         queue = config.queueName,
                         autoAck = false,
                         consumerTag = consumerTag,
@@ -318,10 +317,9 @@ module Consumer =
                         consumer = consumer
                     )
 
-                return Ok(Consumer consumer)
+                return Ok (Consumer consumer)
 
-            with
-            | exn ->
+            with exn ->
                 // Abort connection gracefully on any unexpected error.
                 do! connection.AbortAsync connectionCloseTimeout
 
@@ -333,52 +331,55 @@ module Consumer =
     /// <param name="logger">Logger.</param>
     /// <param name="onReceivedAsync">Callback that's called when a new message is received.</param>
     /// <returns>Callbacks</returns>
-    let terminateOnUnexpectedEvents (logger: ILogger) (onReceivedAsync: ReceivedMessage -> Async<unit>) : Callbacks =
-        { onReceived =
+    let terminateOnUnexpectedEvents (logger: ILogger) (onReceivedAsync: ReceivedMessage -> Async<unit>) : Callbacks = {
+        onReceived =
             fun message ->
                 async {
                     try
                         do! onReceivedAsync message
-                    with
-                    | exn ->
-                        logger.LogError(exn, "Got unexpected error during event `Received`. Will terminate the process")
+                    with exn ->
+                        logger.LogError (
+                            exn,
+                            "Got unexpected error during event `Received`. Will terminate the process"
+                        )
 
                         exit 9
                 }
 
-          onRegistered = fun queueName -> logger.LogInformation("Consumer registered on queue {queueName}", queueName)
+        onRegistered = fun queueName -> logger.LogInformation ("Consumer registered on queue {queueName}", queueName)
 
-          onUnregistered =
-              fun event ->
-                  // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-                  if event.replyCode <> Constants.ReplySuccess then
-                      logger.LogError(
-                          "Got unexpected event `Unregistered` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
-                          event.queueName,
-                          event.replyCode,
-                          event.replyText
-                      )
+        onUnregistered =
+            fun event ->
+                // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
+                if event.replyCode <> Constants.ReplySuccess then
+                    logger.LogError (
+                        "Got unexpected event `Unregistered` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
+                        event.queueName,
+                        event.replyCode,
+                        event.replyText
+                    )
 
-                      exit 11
+                    exit 11
 
-          onShutdown =
-              fun event ->
-                  // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-                  if event.replyCode = Constants.ReplySuccess then
-                      logger.LogInformation(
-                          "Got expected event `Shutdown` for consumer on queue {queueName}",
-                          event.queueName
-                      )
+        onShutdown =
+            fun event ->
+                // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
+                if event.replyCode = Constants.ReplySuccess then
+                    logger.LogInformation (
+                        "Got expected event `Shutdown` for consumer on queue {queueName}",
+                        event.queueName
+                    )
 
-                  else
-                      logger.LogError(
-                          "Got unexpected event `Shutdown` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
-                          event.queueName,
-                          event.replyCode,
-                          event.replyText
-                      )
+                else
+                    logger.LogError (
+                        "Got unexpected event `Shutdown` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
+                        event.queueName,
+                        event.replyCode,
+                        event.replyText
+                    )
 
-                      exit 13 }
+                    exit 13
+    }
 
 module RPC =
     open System.Threading
@@ -388,17 +389,19 @@ module RPC =
 
     and RequestAsync = RequestMessage -> Async<Result<ResponseMessage, string>>
 
-    and RequestMessage =
-        { queue: string
-          headers: List<string * string>
-          body: RequestBody
-          timeout: System.TimeSpan }
+    and RequestMessage = {
+        queue: string
+        headers: List<string * string>
+        body: RequestBody
+        timeout: System.TimeSpan
+    }
 
     and RequestBody = Json of string
 
-    and ResponseMessage =
-        { body: string
-          headers: System.Collections.Generic.IDictionary<string, obj> }
+    and ResponseMessage = {
+        body: string
+        headers: System.Collections.Generic.IDictionary<string, obj>
+    }
 
     type private CorrelationId = string
 
@@ -411,19 +414,19 @@ module RPC =
     let private requestAsync (pendingRequests: PendingRequests) (consumer: AsyncEventingBasicConsumer) : RequestAsync =
         fun message ->
             task {
-                let messageId = System.Guid.NewGuid().ToString()
+                let messageId = System.Guid.NewGuid().ToString ()
 
-                let completionSource = TaskCompletionSource<_>()
+                let completionSource = TaskCompletionSource<_> ()
 
-                use cancellationSource = new CancellationTokenSource(message.timeout)
+                use cancellationSource = new CancellationTokenSource (message.timeout)
 
                 let cancellationCallback () =
                     // Ensure the  pending request is removed to prevent memory leaks.
                     pendingRequests.TryRemove messageId |> ignore
 
                     // Try set error result.
-                    completionSource.TrySetResult(
-                        $"Request to queue '%s{message.queue}' timed out after %s{message.timeout.TotalSeconds.ToString()}s"
+                    completionSource.TrySetResult (
+                        $"Request to queue '%s{message.queue}' timed out after %s{message.timeout.TotalSeconds.ToString ()}s"
                         |> Error
                     )
                     |> ignore
@@ -431,30 +434,27 @@ module RPC =
                 // On received reply we will return from this function and `Dispose` will be called.
                 // `Dispose` will cancel the call to the callback.
                 use _cancellationRegistration =
-                    cancellationSource.Token.Register(
+                    cancellationSource.Token.Register (
                         callback = cancellationCallback,
                         useSynchronizationContext = false
                     )
 
                 try
-                    if pendingRequests.TryAdd(messageId, completionSource) then
+                    if pendingRequests.TryAdd (messageId, completionSource) then
                         let contentType, requestBody =
                             match message.body with
                             | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
 
-                        let requestHeaders =
-                            message.headers
-                            |> Seq.map (fun (k, v) -> k, v :> obj)
-                            |> dict
+                        let requestHeaders = message.headers |> Seq.map (fun (k, v) -> k, v :> obj) |> dict
 
                         do!
-                            consumer.Channel.BasicPublishAsync(
+                            consumer.Channel.BasicPublishAsync (
                                 exchange = "",
                                 routingKey = message.queue,
                                 // We don't care if the reply message got routed or not as we're using timeout.
                                 mandatory = false,
                                 basicProperties =
-                                    BasicProperties(
+                                    BasicProperties (
                                         ContentType = contentType,
                                         Persistent = false,
                                         MessageId = messageId,
@@ -469,8 +469,8 @@ module RPC =
                     else
                         return Error $"RabbitMqClient.RPC.request: Duplicate message id %s{messageId}"
 
-                with
-                | exn -> return Error(string exn)
+                with exn ->
+                    return Error (string exn)
             }
             |> Async.AwaitTask
 
@@ -481,25 +481,26 @@ module RPC =
         : Async<Result<Client, string>> =
         task {
             try
-                let pendingRequests: PendingRequests = ConcurrentDictionary()
+                let pendingRequests: PendingRequests = ConcurrentDictionary ()
 
                 let consumerTag =
                     queueDirectReplyTo
                     + "-"
                     + clientName
                     + "-consumer-"
-                    + System.Guid.NewGuid().ToString()
+                    + System.Guid.NewGuid().ToString ()
 
-                let! channel = connection.CreateChannelAsync()
+                let! channel = connection.CreateChannelAsync ()
 
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
                     task {
                         let reason = $"%s{clientName}: Unhandled channel exception, closing connection"
 
-                        logger.LogError(eventArgs.Exception, reason)
+                        logger.LogError (eventArgs.Exception, reason)
 
-                        do! connection.AbortAsync(uint16 Constants.ChannelError, reason, connectionCloseTimeout)
-                    })
+                        do! connection.AbortAsync (uint16 Constants.ChannelError, reason, connectionCloseTimeout)
+                    }
+                )
 
                 let consumer = AsyncEventingBasicConsumer channel
 
@@ -509,33 +510,36 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            let responseMessage: ResponseMessage =
-                                { body = System.Text.Encoding.UTF8.GetString eventArgs.Body.Span
-                                  headers = eventArgs.BasicProperties.Headers }
+                            let responseMessage: ResponseMessage = {
+                                body = System.Text.Encoding.UTF8.GetString eventArgs.Body.Span
+                                headers = eventArgs.BasicProperties.Headers
+                            }
 
-                            if not (tcs.TrySetResult(Ok responseMessage)) then
-                                logger.LogWarning(
+                            if not (tcs.TrySetResult (Ok responseMessage)) then
+                                logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
                                     clientName,
                                     correlationId
                                 )
 
                         | _ ->
-                            logger.LogWarning(
+                            logger.LogWarning (
                                 "Consumer {clientName} received reply without known correlation id: {correlationId}",
                                 clientName,
                                 correlationId
                             )
-                    })
+                    }
+                )
 
                 consumer.add_RegisteredAsync (fun _ eventArgs ->
                     task {
-                        logger.LogInformation(
+                        logger.LogInformation (
                             "Consumer {clientName} registered {consumerTags}",
                             clientName,
                             eventArgs.ConsumerTags
                         )
-                    })
+                    }
+                )
 
                 consumer.add_UnregisteredAsync (fun _ eventArgs ->
                     task {
@@ -547,29 +551,31 @@ module RPC =
 
                         // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
                         if replyCode <> Constants.ReplySuccess then
-                            logger.LogWarning(
+                            logger.LogWarning (
                                 "Consumer {clientName} unregistered {consumerTags}",
                                 clientName,
                                 eventArgs.ConsumerTags
                             )
-                    })
+                    }
+                )
 
                 consumer.add_ShutdownAsync (fun _ eventArgs ->
                     task {
                         if eventArgs.ReplyCode = uint16 Constants.ReplySuccess then
-                            logger.LogInformation("Got expected event `Shutdown` for {clientName}", clientName)
+                            logger.LogInformation ("Got expected event `Shutdown` for {clientName}", clientName)
 
                         else
-                            logger.LogWarning(
+                            logger.LogWarning (
                                 "Get unexpected event `Shutdown` for {clientName}. {replyCode} - {replyText}",
                                 clientName,
                                 eventArgs.ReplyCode,
                                 eventArgs.ReplyText
                             )
-                    })
+                    }
+                )
 
                 let! _ =
-                    channel.BasicConsumeAsync(
+                    channel.BasicConsumeAsync (
                         queue = queueDirectReplyTo,
                         autoAck = true, // Must be true for direct-reply-to.
                         consumerTag = consumerTag,
@@ -579,9 +585,12 @@ module RPC =
                         consumer = consumer
                     )
 
-                return Ok { requestAsync = requestAsync pendingRequests consumer }
+                return
+                    Ok {
+                        requestAsync = requestAsync pendingRequests consumer
+                    }
 
-            with
-            | exn -> return Error(string exn)
+            with exn ->
+                return Error (string exn)
         }
         |> Async.AwaitTask

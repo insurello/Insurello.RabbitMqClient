@@ -1,5 +1,3 @@
 # Insurello.RabbitMqClient
 
-An F# wrapper around RabbitMq.Client version 5.
-
-[![Insurello](https://gitcdn.xyz/repo/insurello/elm-swedish-bank-account-number/master/insurello.svg)](https://jobb.insurello.se/departments/product-tech)
+An specialized F# wrapper around [RabbitMq.Client](https://github.com/rabbitmq/rabbitmq-dotnet-client).

@@ -1,19 +1,12 @@
-# Compiled code
+# Compiler outputs
 src/*/bin
-
-# Temp files created by the compiler
 src/*/obj
-
-# Release folder
-out
-Release
+src/*/out
+out/
 
 # IDEs
-.vs
 .vscode
 .idea
-.ionide
-.fake
 
-# Mac
+# macOS
 .DS_Store
