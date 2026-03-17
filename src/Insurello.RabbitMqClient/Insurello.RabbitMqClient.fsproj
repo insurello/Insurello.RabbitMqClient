@@ -3,7 +3,7 @@
     <TargetFramework>net8.0</TargetFramework>
   
     <PackageId>Insurello.RabbitMqClient</PackageId>
-    <PackageDescription>An specialized F# wrapper around RabbitMq.Client</PackageDescription>
+    <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
     <Authors>Insurello</Authors>

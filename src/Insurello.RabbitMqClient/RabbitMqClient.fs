@@ -286,7 +286,7 @@ module Consumer =
                         if eventArgs.ConsumerTags |> Array.contains consumerTag then
                             let replyCode, replyText =
                                 if consumer.ShutdownReason = null then
-                                    0, "Missing ShutdownReason. Did the queue got deleted?"
+                                    0, "Missing ShutdownReason. Was the queue deleted?"
                                 else
                                     int consumer.ShutdownReason.ReplyCode, consumer.ShutdownReason.ReplyText
 
@@ -431,7 +431,8 @@ module RPC =
             task {
                 let messageId = System.Guid.NewGuid().ToString ()
 
-                let completionSource = TaskCompletionSource<_> ()
+                let completionSource =
+                    TaskCompletionSource<_> TaskCreationOptions.RunContinuationsAsynchronously
 
                 use cancellationSource = new CancellationTokenSource (message.timeout)
 
@@ -581,7 +582,7 @@ module RPC =
 
                         else
                             logger.LogWarning (
-                                "Get unexpected event `Shutdown` for {clientName}. {replyCode} - {replyText}",
+                                "Got unexpected event `Shutdown` for {clientName}. {replyCode} - {replyText}",
                                 clientName,
                                 eventArgs.ReplyCode,
                                 eventArgs.ReplyText
@@ -655,7 +656,7 @@ module Publish =
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
     // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
-    let private publicAsync (clientName: string) (channel: IChannel) : PublishAsync =
+    let private publishAsync (clientName: string) (channel: IChannel) : PublishAsync =
         fun message ->
             task {
                 let messageId = System.Guid.NewGuid().ToString ()
@@ -725,7 +726,7 @@ module Publish =
 
                 return
                     Ok {
-                        publishAsync = publicAsync clientName channel
+                        publishAsync = publishAsync clientName channel
                     }
 
             with exn ->
