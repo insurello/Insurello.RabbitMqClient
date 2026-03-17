@@ -28,7 +28,7 @@ module Connection =
     }
 
     let initAsync
-        (connectionConfig: ConnectionConfig)
+        (config: ConnectionConfig)
         (onConnectionShutdown: OnConnectionShutdown)
         : Async<Result<Connection * CloseConnection, string>> =
         task {
@@ -37,19 +37,19 @@ module Connection =
                     ConnectionFactory (
                         AutomaticRecoveryEnabled = false,
                         RequestedHeartbeat = System.TimeSpan.FromSeconds 15.,
-                        VirtualHost = connectionConfig.vhost
+                        VirtualHost = config.vhost
                     )
 
                 let! connection =
                     factory.CreateConnectionAsync (
-                        endpoints = List.map AmqpTcpEndpoint connectionConfig.endpoints,
-                        clientProvidedName = connectionConfig.name
+                        endpoints = List.map AmqpTcpEndpoint config.endpoints,
+                        clientProvidedName = config.name
                     )
 
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
                         onConnectionShutdown {
-                            connectionName = connectionConfig.name
+                            connectionName = config.name
                             replyCode = int eventArgs.ReplyCode
                             replyText = eventArgs.ReplyText
                         }
@@ -67,7 +67,7 @@ module Connection =
                     )
 
             with exn ->
-                return Error $"%s{connectionConfig.name}: Failed to connect to RabbitMQ: %s{string exn}"
+                return Error $"%s{config.name}: Failed to connect to RabbitMQ: %s{string exn}"
         }
         |> Async.AwaitTask
 
@@ -90,7 +90,7 @@ module Connection =
 
 module Consumer =
 
-    type Model = private Consumer of AsyncEventingBasicConsumer
+    type Consumer = private Consumer of AsyncEventingBasicConsumer
 
     type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * AsyncEventingBasicConsumer
 
@@ -173,8 +173,8 @@ module Consumer =
         task {
             try
                 match eventArgs.BasicProperties.ReplyTo, eventArgs.BasicProperties.MessageId with
-                | null, _ -> return Error "Missing reply_to property."
-                | _, null -> return Error "Missing message_id property."
+                | null, _ -> return Error "Missing reply_to property"
+                | _, null -> return Error "Missing message_id property"
 
                 | replyTo, correlationId ->
                     let messageId = System.Guid.NewGuid().ToString ()
@@ -184,18 +184,17 @@ module Consumer =
                         | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
                         | Binary data -> "application/octet-stream", data
 
-                    let publishWithHeaders =
+                    let headers =
                         // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
                         ("sequence_end", "true") :: replyMessage.headers
-                        |> Seq.map (fun (k, v) -> k, v :> obj)
-                        |> dict
+                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                        |> System.Collections.Generic.Dictionary
 
                     do!
                         consumer.Channel.BasicPublishAsync (
                             exchange = "",
                             routingKey = replyTo,
-                            // mandatory should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations)
-                            // which is a very common use case for replies.
+                            // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
                             mandatory = false,
                             basicProperties =
                                 BasicProperties (
@@ -203,7 +202,7 @@ module Consumer =
                                     Persistent = true,
                                     MessageId = messageId,
                                     CorrelationId = correlationId,
-                                    Headers = publishWithHeaders
+                                    Headers = headers
                                 ),
                             body = body
                         )
@@ -217,7 +216,7 @@ module Consumer =
 
     /// <summary>Declares and optionally binds the specified queue, then starts consuming messages.</summary>
     /// <param name="config">Queue configuration.</param>
-    let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<Model, string>> =
+    let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<Consumer, string>> =
         task {
             try
                 let! channel = connection.CreateChannelAsync ()
@@ -259,7 +258,7 @@ module Consumer =
                         channel.QueueBindAsync (
                             queue = config.queueName,
                             exchange = config.bindToExchange.Value,
-                            routingKey = "*",
+                            routingKey = "*", // TODO: Should be move this to config now, as this is really opinionated.
                             arguments = null
                         )
 
@@ -323,7 +322,7 @@ module Consumer =
                 return Ok (Consumer consumer)
 
             with exn ->
-                // Abort connection gracefully on any unexpected error.
+                // Abort connection gracefully on any unexpected error. TODO: Remove this? Move to Program?
                 do! connection.AbortAsync connectionCloseTimeout
 
                 return Error $"RabbitMqClient.Consumer: %s{string exn}"
@@ -385,8 +384,8 @@ module Consumer =
     }
 
 module RPC =
-    open System.Threading
     open System.Collections.Concurrent
+    open System.Threading
 
     type RequestMessage = {
         queue: string
@@ -464,13 +463,16 @@ module RPC =
                             match message.body with
                             | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
 
-                        let requestHeaders = message.headers |> Seq.map (fun (k, v) -> k, v :> obj) |> dict
+                        let requestHeaders =
+                            message.headers
+                            |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                            |> System.Collections.Generic.Dictionary
 
                         do!
                             consumer.Channel.BasicPublishAsync (
                                 exchange = "",
                                 routingKey = message.queue,
-                                // We don't care if the reply message got routed or not as we're using timeout.
+                                // We don't care if the request message got routed or not as we're using timeout.
                                 mandatory = false,
                                 basicProperties =
                                     BasicProperties (
@@ -488,7 +490,7 @@ module RPC =
                         | Ok response -> return Ok (mapResponse response.BasicProperties.Headers response.Body)
 
                     else
-                        return Error $"RabbitMqClient.RPC.request: Duplicate message id %s{messageId}"
+                        return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
 
                 with exn ->
                     return Error (string exn)
@@ -641,6 +643,7 @@ module RPC =
             | _ -> None
 
 module Publish =
+
     type PublishMessage = {
         queue: string
         headers: List<string * string>
@@ -648,7 +651,7 @@ module Publish =
         timeout: System.TimeSpan
     }
 
-    // TODO: Share with RPC?
+    // TODO: Share with Consumer/RPC?
     and PublishMessageBody = Json of string
 
     type PublishAsync = PublishMessage -> Async<Result<unit, string>>
@@ -683,7 +686,7 @@ module Publish =
                             exchange = "",
                             routingKey = message.queue,
                             body = publishBody,
-                            mandatory = true, // If queue doesn't exist at the broker, a "basic return" is replied.
+                            mandatory = true, // If the queue doesn't exist, a `basic return` is replied.
                             basicProperties =
                                 BasicProperties (
                                     ContentType = contentType,
@@ -697,7 +700,8 @@ module Publish =
                     return Ok ()
 
                 with exn ->
-                    return Error $"%s{clientName}: Publish exception. Details: %s{string exn}"
+                    // `BasicPublishAsync` with `publisherConfirmationsEnabled` and `publisherConfirmationTrackingEnabled` indicates `nack` or `basic return` by throwing.
+                    return Error $"%s{clientName}: Failed to publish to queue. Details: %s{string exn}"
             }
             |> Async.AwaitTask
 
