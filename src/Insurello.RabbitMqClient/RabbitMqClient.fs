@@ -629,18 +629,15 @@ module RPC =
         }
         |> Async.AwaitTask
 
-    module ResponseHeaders =
-        let inline has (key: string) (headers: ResponseHeaders) = headers.ContainsKey key
-
-        let string (key: string) (headers: ResponseHeaders) : Option<string> =
-            match headers.TryGetValue key with
-            | true, objectValue ->
-                match objectValue with
-                | :? System.ReadOnlyMemory<byte> as bytes -> Some (System.Text.Encoding.UTF8.GetString bytes.Span)
-
-                | _ -> None
+    let responseHeaderAsString (key: string) (headers: ResponseHeaders) : Option<string> =
+        match headers.TryGetValue key with
+        | true, objectValue ->
+            match objectValue with
+            | :? array<byte> as bytes -> Some (System.Text.Encoding.UTF8.GetString bytes)
 
             | _ -> None
+
+        | _ -> None
 
 module Publish =
 
@@ -651,7 +648,6 @@ module Publish =
         timeout: System.TimeSpan
     }
 
-    // TODO: Share with Consumer/RPC?
     and PublishMessageBody = Json of string
 
     type PublishAsync = PublishMessage -> Async<Result<unit, string>>
