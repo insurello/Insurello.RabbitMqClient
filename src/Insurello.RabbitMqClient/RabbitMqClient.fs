@@ -109,13 +109,15 @@ module Consumer =
 
     and QueueConfig = {
         queueName: string
-        bindToExchange: Option<string>
+        bindings: List<QueueBinding>
         callbacks: Callbacks
         messageTimeToLive: Option<int>
         /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
         prefetchCount: uint16
         queueType: QueueType
     }
+
+    and QueueBinding = { exchange: string; routingKey: string }
 
     and QueueType =
         | Quorum
@@ -253,12 +255,12 @@ module Consumer =
                             )
                     )
 
-                if Option.isSome config.bindToExchange then
+                for queueBinding in config.bindings do
                     do!
                         channel.QueueBindAsync (
                             queue = config.queueName,
-                            exchange = config.bindToExchange.Value,
-                            routingKey = "*", // TODO: Should be move this to config now, as this is really opinionated.
+                            exchange = queueBinding.exchange,
+                            routingKey = queueBinding.routingKey,
                             arguments = null
                         )
 
@@ -322,9 +324,6 @@ module Consumer =
                 return Ok (Consumer consumer)
 
             with exn ->
-                // Abort connection gracefully on any unexpected error. TODO: Remove this? Move to Program?
-                do! connection.AbortAsync connectionCloseTimeout
-
                 return Error $"RabbitMqClient.Consumer: %s{string exn}"
         }
         |> Async.AwaitTask
