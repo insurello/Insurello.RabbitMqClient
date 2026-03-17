@@ -653,8 +653,8 @@ module Publish =
 
     // References:
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
-    // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/main/projects/Applications/PublisherConfirms/PublisherConfirms.cs
-    // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/main/Program.cs
+    // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
+    // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
     let private publicAsync (clientName: string) (channel: IChannel) : PublishAsync =
         fun message ->
             task {
