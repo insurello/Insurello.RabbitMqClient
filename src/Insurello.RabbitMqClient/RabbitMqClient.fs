@@ -90,8 +90,6 @@ module Connection =
 
 module Consumer =
 
-    type Consumer = private Consumer of AsyncEventingBasicConsumer
-
     type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * AsyncEventingBasicConsumer
 
     type Callbacks = {
@@ -218,7 +216,7 @@ module Consumer =
 
     /// <summary>Declares and optionally binds the specified queue, then starts consuming messages.</summary>
     /// <param name="config">Queue configuration.</param>
-    let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<Consumer, string>> =
+    let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<unit, string>> =
         task {
             try
                 let! channel = connection.CreateChannelAsync ()
@@ -321,7 +319,7 @@ module Consumer =
                         consumer = consumer
                     )
 
-                return Ok (Consumer consumer)
+                return Ok ()
 
             with exn ->
                 return Error $"RabbitMqClient.Consumer: %s{string exn}"
