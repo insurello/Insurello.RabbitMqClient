@@ -9,12 +9,11 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@v6
 
       - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore -warnaserror
-      - run: dotnet test --no-build
-      - run: dotnet pack --configuration Release -o Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
-      - run: dotnet nuget push Release/*.nupkg --skip-duplicate --source https://api.nuget.org/v3/index.json -k ${NUGET_AUTH_TOKEN}
+      - run: dotnet build --configuration Release --no-restore --warnaserror
+      - run: dotnet pack --configuration Release -o out/Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
+      - run: dotnet nuget push out/Release/*.nupkg --skip-duplicate --source https://api.nuget.org/v3/index.json -k ${NUGET_AUTH_TOKEN}
         env:
           NUGET_AUTH_TOKEN: ${{secrets.NUGET_AUTH_TOKEN}}

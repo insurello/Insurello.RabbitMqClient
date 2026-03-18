@@ -1,0 +1,21 @@
+[*.fs]
+# Configures fantomas - https://fsprojects.github.io/fantomas/docs/end-users/Configuration.html
+# 
+# We strive to always use the defaults to prevent bikeshedding unless we have solid use cases against.
+#
+# Overrides:
+
+# To force eventual Windows users to keep using line feeds for simpler git diffs.
+end_of_line=lf
+
+# Faster to edit lists and records as you don't have to match ending blocks.
+fsharp_multiline_bracket_style=stroustrup
+
+# Faster to see where a lambda ends.
+fsharp_multi_line_lambda_closing_newline=true
+
+# Prevents accidental new lines.
+fsharp_keep_max_number_of_blank_lines=1
+
+# Some(x) => Some (x) so that Rider will detect unnecessary parentheses.
+fsharp_space_before_uppercase_invocation=true

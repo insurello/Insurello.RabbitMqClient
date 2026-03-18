@@ -1,18 +1,21 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-
   <PropertyGroup>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net8.0</TargetFramework>
+  
     <PackageId>Insurello.RabbitMqClient</PackageId>
-    <Authors>Insurello</Authors>
-    <Company>Insurello</Company>
-    <PackageDescription>F# wrapper around RabbitMq.Client</PackageDescription>
-    <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/insurello/Insurello.RabbitMqClient</RepositoryUrl>
+    <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
+    <Authors>Insurello</Authors>
+    <Company>Insurello</Company>
+
+    <RepositoryType>git</RepositoryType>
+    <RepositoryUrl>https://github.com/insurello/Insurello.RabbitMqClient</RepositoryUrl>
+  
     <!-- Source Link configuration -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
     <EmbedSources>true</EmbedSources>
+
     <!-- Embed symbols containing Source Link in the main file (exe/dll) -->
     <DebugType>embedded</DebugType>
 
@@ -20,25 +23,32 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink.
-         It's only used while building. -->
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="1.1.1" PrivateAssets="All" />
+    <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink. It's only used while building. -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.201" PrivateAssets="All" />
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Include="MqClient.fs" />
-  </ItemGroup>
+  <PropertyGroup>
+    <!-- Enable opt-in warnings:
+    1182   = Unused variables
+    3389   = Implicit numeric widening
+    FS3560 = Copy and update changes all fields
+    -->
+    <WarnOn>1182,3389,FS3560</WarnOn>
 
-  <ItemGroup>
-    <PackageReference Include="Insurello.AsyncExtra" Version="3.0.0" />
-    <PackageReference Include="RabbitMq.Client" Version="5.1.2" />
-  </ItemGroup>
+    <!-- Set enabled warnings as error during development:
+    FS0025 = Incomplete pattern matching
+    -->
+    <WarningsAsErrors>3389,FS0025</WarningsAsErrors>
+  </PropertyGroup>
   
+  <!-- Source files -->
   <ItemGroup>
-    <!-- Pin FSharp.Core package to minimum supported 6.0.0
-     https://github.com/dotnet/fsharp/blob/main/docs/fsharp-core-notes.md
-     -->
-    <PackageReference Update="FSharp.Core" Version="6.0.0" />
+    <Compile Include="RabbitMqClient.fs" />
   </ItemGroup>
 
+  <!-- Dependencies -->
+  <ItemGroup>
+    <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
+  </ItemGroup>
 </Project>
