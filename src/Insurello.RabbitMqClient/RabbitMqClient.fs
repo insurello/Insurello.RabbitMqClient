@@ -60,8 +60,6 @@ module Connection =
                     toEndpoint connection.Endpoint
                 )
 
-                let exposedConnection = Connection connection
-
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
                         onConnectionShutdown logger {
@@ -75,7 +73,7 @@ module Connection =
 
                 return
                     Ok (
-                        exposedConnection,
+                        Connection connection,
                         (fun () ->
                             connection.AbortAsync connectionCloseTimeout
                             |> Async.AwaitTask
