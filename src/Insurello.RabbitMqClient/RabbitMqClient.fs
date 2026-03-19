@@ -11,10 +11,11 @@ let private connectionCloseTimeout = System.TimeSpan.FromSeconds 15.0
 
 module Connection =
 
-    type OnConnectionShutdown = OnConnectionShutdownEvent -> unit
+    type OnConnectionShutdown = ILogger -> OnConnectionShutdownEvent -> unit
 
     and OnConnectionShutdownEvent = {
         connectionName: string
+        connectionEndpoint: string
         replyCode: int
         replyText: string
     }
@@ -28,6 +29,7 @@ module Connection =
     }
 
     let initAsync
+        (logger: ILogger)
         (config: ConnectionConfig)
         (onConnectionShutdown: OnConnectionShutdown)
         : Async<Result<Connection * CloseConnection, string>> =
@@ -46,10 +48,16 @@ module Connection =
                         clientProvidedName = config.name
                     )
 
+                logger.LogInformation (
+                    "Connected to RabbitMQ node endpoint {connectionEndpoint}",
+                    string connection.Endpoint
+                )
+
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
-                        onConnectionShutdown {
+                        onConnectionShutdown logger {
                             connectionName = config.name
+                            connectionEndpoint = string connection.Endpoint
                             replyCode = int eventArgs.ReplyCode
                             replyText = eventArgs.ReplyText
                         }
@@ -72,11 +80,15 @@ module Connection =
         |> Async.AwaitTask
 
     /// If the connection is unexpectedly closed the system will exit with error code 13.
-    let terminateOnUnexpectedShutdown (logger: ILogger) : OnConnectionShutdown =
-        fun event ->
+    let terminateOnUnexpectedShutdown: OnConnectionShutdown =
+        fun logger event ->
             // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
             if event.replyCode = Constants.ReplySuccess then
-                logger.LogWarning ("Closing RabbitMQ connection {connectionName}", event.connectionName)
+                logger.LogWarning (
+                    "Closing RabbitMQ connection {connectionName} on node endpoint {connectionEndpoint}",
+                    event.connectionName,
+                    event.connectionEndpoint
+                )
 
             else if event.replyCode <> Constants.ReplySuccess then
                 logger.LogError (
