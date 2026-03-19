@@ -56,7 +56,7 @@ module Connection =
                     )
 
                 logger.LogInformation (
-                    "Connected to RabbitMQ node endpoint {@rabbitMqNode}",
+                    "Connected to RabbitMQ node endpoint {@nodeEndpoint}",
                     toEndpoint connection.Endpoint
                 )
 
