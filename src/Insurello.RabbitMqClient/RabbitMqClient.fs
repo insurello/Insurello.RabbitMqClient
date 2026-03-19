@@ -22,10 +22,14 @@ module Connection =
 
     type CloseConnection = unit -> unit
 
+    type Endpoint = { host: string; port: int }
+
     type ConnectionConfig = {
         name: string
+        username: string
+        password: string
         vhost: string
-        endpoints: List<System.Uri>
+        endpoints: List<Endpoint>
     }
 
     let initAsync
@@ -44,7 +48,12 @@ module Connection =
 
                 let! connection =
                     factory.CreateConnectionAsync (
-                        endpoints = List.map AmqpTcpEndpoint config.endpoints,
+                        endpoints =
+                            List.map
+                                (fun endpoint ->
+                                    AmqpTcpEndpoint (hostName = endpoint.host, portOrMinusOne = endpoint.port)
+                                )
+                                config.endpoints,
                         clientProvidedName = config.name
                     )
 
