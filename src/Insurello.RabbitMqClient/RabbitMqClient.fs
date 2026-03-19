@@ -20,8 +20,6 @@ module Connection =
         replyText: string
     }
 
-    and Endpoint = { hostname: string; port: int }
-
     type CloseConnection = unit -> unit
 
     type ConnectionConfig = {
