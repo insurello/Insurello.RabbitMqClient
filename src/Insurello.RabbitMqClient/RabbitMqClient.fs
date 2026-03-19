@@ -15,9 +15,12 @@ module Connection =
 
     and OnConnectionShutdownEvent = {
         connectionName: string
+        connectionEndpoint: Endpoint
         replyCode: int
         replyText: string
     }
+
+    and Endpoint = { hostname: string; port: int }
 
     type CloseConnection = unit -> unit
 
@@ -25,6 +28,11 @@ module Connection =
         name: string
         vhost: string
         endpoints: List<System.Uri>
+    }
+
+    let endpoint (Connection connection) : Endpoint = {
+        hostname = connection.Endpoint.HostName
+        port = connection.Endpoint.Port
     }
 
     let initAsync
@@ -46,10 +54,13 @@ module Connection =
                         clientProvidedName = config.name
                     )
 
+                let exposedConnection = Connection connection
+
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
                         onConnectionShutdown {
                             connectionName = config.name
+                            connectionEndpoint = endpoint exposedConnection
                             replyCode = int eventArgs.ReplyCode
                             replyText = eventArgs.ReplyText
                         }
@@ -58,7 +69,7 @@ module Connection =
 
                 return
                     Ok (
-                        Connection connection,
+                        exposedConnection,
                         (fun () ->
                             connection.AbortAsync connectionCloseTimeout
                             |> Async.AwaitTask
@@ -76,7 +87,11 @@ module Connection =
         fun event ->
             // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
             if event.replyCode = Constants.ReplySuccess then
-                logger.LogWarning ("Closing RabbitMQ connection {connectionName}", event.connectionName)
+                logger.LogWarning (
+                    "Closing RabbitMQ connection {connectionName} on node endpoint {@connectionEndpoint}",
+                    event.connectionName,
+                    event.connectionEndpoint
+                )
 
             else if event.replyCode <> Constants.ReplySuccess then
                 logger.LogError (
