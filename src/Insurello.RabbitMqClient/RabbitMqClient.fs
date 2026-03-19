@@ -11,7 +11,7 @@ let private connectionCloseTimeout = System.TimeSpan.FromSeconds 15.0
 
 module Connection =
 
-    type OnConnectionShutdown = OnConnectionShutdownEvent -> unit
+    type OnConnectionShutdown = ILogger -> OnConnectionShutdownEvent -> unit
 
     and OnConnectionShutdownEvent = {
         connectionName: string
@@ -30,12 +30,13 @@ module Connection =
         endpoints: List<System.Uri>
     }
 
-    let endpoint (Connection connection) : Endpoint = {
-        hostname = connection.Endpoint.HostName
-        port = connection.Endpoint.Port
+    let private toEndpoint (endpoint: AmqpTcpEndpoint) : Endpoint = {
+        hostname = endpoint.HostName
+        port = endpoint.Port
     }
 
     let initAsync
+        (logger: ILogger)
         (config: ConnectionConfig)
         (onConnectionShutdown: OnConnectionShutdown)
         : Async<Result<Connection * CloseConnection, string>> =
@@ -54,13 +55,18 @@ module Connection =
                         clientProvidedName = config.name
                     )
 
+                logger.LogInformation (
+                    "Connected to RabbitMQ node endpoint {@rabbitMqNode}",
+                    toEndpoint connection.Endpoint
+                )
+
                 let exposedConnection = Connection connection
 
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
-                        onConnectionShutdown {
+                        onConnectionShutdown logger {
                             connectionName = config.name
-                            connectionEndpoint = endpoint exposedConnection
+                            connectionEndpoint = toEndpoint connection.Endpoint
                             replyCode = int eventArgs.ReplyCode
                             replyText = eventArgs.ReplyText
                         }
@@ -83,8 +89,8 @@ module Connection =
         |> Async.AwaitTask
 
     /// If the connection is unexpectedly closed the system will exit with error code 13.
-    let terminateOnUnexpectedShutdown (logger: ILogger) : OnConnectionShutdown =
-        fun event ->
+    let terminateOnUnexpectedShutdown: OnConnectionShutdown =
+        fun logger event ->
             // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
             if event.replyCode = Constants.ReplySuccess then
                 logger.LogWarning (
