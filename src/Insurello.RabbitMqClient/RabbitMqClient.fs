@@ -15,7 +15,7 @@ module Connection =
 
     and OnConnectionShutdownEvent = {
         connectionName: string
-        connectionEndpoint: Endpoint
+        connectionEndpoint: string
         replyCode: int
         replyText: string
     }
@@ -28,11 +28,6 @@ module Connection =
         name: string
         vhost: string
         endpoints: List<System.Uri>
-    }
-
-    let private toEndpoint (endpoint: AmqpTcpEndpoint) : Endpoint = {
-        hostname = endpoint.HostName
-        port = endpoint.Port
     }
 
     let initAsync
@@ -56,15 +51,15 @@ module Connection =
                     )
 
                 logger.LogInformation (
-                    "Connected to RabbitMQ node endpoint {@nodeEndpoint}",
-                    toEndpoint connection.Endpoint
+                    "Connected to RabbitMQ node endpoint {connectionEndpoint}",
+                    string connection.Endpoint
                 )
 
                 connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
                         onConnectionShutdown logger {
                             connectionName = config.name
-                            connectionEndpoint = toEndpoint connection.Endpoint
+                            connectionEndpoint = string connection.Endpoint
                             replyCode = int eventArgs.ReplyCode
                             replyText = eventArgs.ReplyText
                         }
@@ -92,7 +87,7 @@ module Connection =
             // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
             if event.replyCode = Constants.ReplySuccess then
                 logger.LogWarning (
-                    "Closing RabbitMQ connection {connectionName} on node endpoint {@connectionEndpoint}",
+                    "Closing RabbitMQ connection {connectionName} on node endpoint {connectionEndpoint}",
                     event.connectionName,
                     event.connectionEndpoint
                 )
