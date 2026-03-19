@@ -43,7 +43,9 @@ module Connection =
                     ConnectionFactory (
                         AutomaticRecoveryEnabled = false,
                         RequestedHeartbeat = System.TimeSpan.FromSeconds 15.,
-                        VirtualHost = config.vhost
+                        VirtualHost = config.vhost,
+                        UserName = config.username,
+                        Password = config.password
                     )
 
                 let! connection =
