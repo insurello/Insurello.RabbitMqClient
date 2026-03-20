@@ -440,7 +440,7 @@ module RPC =
     type private CorrelationId = string
 
     type private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<BasicDeliverEventArgs, string>>>
+        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], string>>>
 
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
@@ -448,7 +448,7 @@ module RPC =
     let private requestRawAsync<'response>
         (pendingRequests: PendingRequests)
         (consumer: AsyncEventingBasicConsumer)
-        (mapResponse: ResponseHeaders -> System.ReadOnlyMemory<byte> -> 'response)
+        (mapResponse: IReadOnlyBasicProperties -> byte[] -> 'response)
         : RequestMessage -> Async<Result<'response, string>> =
         fun message ->
             task {
@@ -508,7 +508,7 @@ module RPC =
 
                         match! completionSource.Task with
                         | Error error -> return Error error
-                        | Ok response -> return Ok (mapResponse response.BasicProperties.Headers response.Body)
+                        | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
 
                     else
                         return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
@@ -554,7 +554,8 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            if not (tcs.TrySetResult (Ok eventArgs)) then
+                            let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray())
+                            if not (tcs.TrySetResult result) then
                                 logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
                                     clientName,
@@ -630,18 +631,18 @@ module RPC =
                             requestRawAsync
                                 pendingRequests
                                 consumer
-                                (fun headers body -> {
-                                    headers = headers
-                                    body = body.ToArray ()
+                                (fun basicProperties body -> {
+                                    headers = basicProperties.Headers
+                                    body = body
                                 })
 
                         requestAsync =
                             requestRawAsync
                                 pendingRequests
                                 consumer
-                                (fun headers body -> {
-                                    headers = headers
-                                    body = System.Text.Encoding.UTF8.GetString body.Span
+                                (fun basicProperties body -> {
+                                    headers = basicProperties.Headers
+                                    body = System.Text.Encoding.UTF8.GetString body
                                 })
                     }
 
