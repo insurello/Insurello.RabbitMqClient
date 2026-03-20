@@ -554,7 +554,8 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray())
+                            let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
+
                             if not (tcs.TrySetResult result) then
                                 logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
