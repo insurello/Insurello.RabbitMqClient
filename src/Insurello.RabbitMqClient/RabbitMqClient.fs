@@ -5,47 +5,111 @@ open RabbitMQ.Client
 open RabbitMQ.Client.Events
 open System.Threading.Tasks
 
-type Connection = private Connection of IConnection
+type Connection = private Connection of ConnectionModel
 
-let private connectionCloseTimeout = System.TimeSpan.FromSeconds 15.0
+and private ConnectionModel = {
+    logger: ILogger
+    connection: IConnection
+    onUnexpectedEvent: string -> string -> UnexpectedEvent -> Task<unit>
+}
+
+and UnexpectedEvent =
+    | UnexpectedException of exn * UnexpectedExceptionDetails
+    | UnexpectedChannelClosed of UnexpectedChannelClosedDetails
+    | UnexpectedConsumerUnregistered of UnexpectedConsumerUnregistered
+
+and UnexpectedExceptionDetails = {
+    eventName: string
+    detailFromRabbitMQClient: System.Collections.Generic.IDictionary<string, obj>
+}
+
+and UnexpectedChannelClosedDetails = { replyCode: int; replyText: string }
+
+and UnexpectedConsumerUnregistered = {
+    consumerTag: string
+    queueName: string
+}
+
+type CloseConnection = unit -> unit
 
 module Connection =
 
-    type OnConnectionShutdown = ILogger -> OnConnectionShutdownEvent -> unit
+    type Config = {
+        /// Application-specific connection name, will be displayed in the management UI.
+        name: string
 
-    and OnConnectionShutdownEvent = {
-        connectionName: string
-        connectionEndpoint: string
-        replyCode: int
-        replyText: string
+        nodeEndpoints: NodeEndpointsConfig
+
+        connectionTimeout: System.TimeSpan
+
+        heartbeat: System.TimeSpan
+
+        ///  Amount of time client will wait for before re-trying to recover connection.
+        recoveryInterval: System.TimeSpan
+
+        onUnexpectedEventAsync: UnexpectedEvent -> Async<unit>
     }
 
-    type CloseConnection = unit -> unit
-
-    type Endpoint = { host: string; port: int }
-
-    type ConnectionConfig = {
-        name: string
+    and NodeEndpointsConfig = {
         username: string
         password: string
         vhost: string
         endpoints: List<Endpoint>
     }
 
-    let initAsync
-        (logger: ILogger)
-        (config: ConnectionConfig)
-        (onConnectionShutdown: OnConnectionShutdown)
-        : Async<Result<Connection * CloseConnection, string>> =
+    and Endpoint = { host: string; port: int }
+
+    let initThrowOnErrorAsync (logger: ILogger) (config: Config) : Async<Connection * CloseConnection> =
+
+        let onUnexpectedEventAsTask clientTypeName clientName event =
+            task {
+                match event with
+                | UnexpectedException (exn, details) ->
+                    logger.LogError (
+                        exn,
+                        "Unexpected exception from {clientTypeName} {clientName} on event {eventName}. Details: {@detailFromRabbitMQClient}",
+                        clientTypeName,
+                        clientName,
+                        details.eventName,
+                        details.detailFromRabbitMQClient
+                    )
+
+                | UnexpectedChannelClosed details ->
+                    logger.LogError (
+                        "Unexpected channel closed from {clientTypeName} {clientName}. Details: {@details}",
+                        clientTypeName,
+                        clientName,
+                        details
+                    )
+
+                | UnexpectedConsumerUnregistered details ->
+                    logger.LogError (
+                        "Unexpected consumer unregistered from {clientTypeName} {clientName}. Did the queue got deleted? Details: {@details}",
+                        clientTypeName,
+                        clientName,
+                        details
+                    )
+
+                return! config.onUnexpectedEventAsync event
+            }
+
         task {
             try
                 let factory =
                     ConnectionFactory (
-                        AutomaticRecoveryEnabled = false,
-                        RequestedHeartbeat = System.TimeSpan.FromSeconds 15.,
-                        VirtualHost = config.vhost,
-                        UserName = config.username,
-                        Password = config.password
+                        VirtualHost = config.nodeEndpoints.vhost,
+                        UserName = config.nodeEndpoints.username,
+                        Password = config.nodeEndpoints.password,
+
+                        AutomaticRecoveryEnabled = true,
+                        TopologyRecoveryEnabled = true,
+                        NetworkRecoveryInterval = config.recoveryInterval,
+
+                        RequestedConnectionTimeout = config.connectionTimeout,
+                        RequestedHeartbeat = config.heartbeat,
+
+                        ContinuationTimeout = System.TimeSpan.FromSeconds 10., // QueueDeclareAsync, BasicConsumeAsync etc.
+                        HandshakeContinuationTimeout = System.TimeSpan.FromSeconds 10.
                     )
 
                 let! connection =
@@ -55,95 +119,128 @@ module Connection =
                                 (fun endpoint ->
                                     AmqpTcpEndpoint (hostName = endpoint.host, portOrMinusOne = endpoint.port)
                                 )
-                                config.endpoints,
+                                config.nodeEndpoints.endpoints,
                         clientProvidedName = config.name
                     )
 
-                logger.LogInformation (
-                    "Connected to RabbitMQ node endpoint {connectionEndpoint}",
-                    string connection.Endpoint
+                logger.LogInformation ("Connected to node endpoint {connectionEndpoint}", string connection.Endpoint)
+
+                connection.add_CallbackExceptionAsync (fun _ eventArgs ->
+                    onUnexpectedEventAsTask
+                        "connection"
+                        config.name
+                        (UnexpectedException (
+                            eventArgs.Exception,
+                            {
+                                eventName = "CallbackExceptionEvent"
+                                detailFromRabbitMQClient = eventArgs.Detail
+                            }
+                        ))
                 )
 
-                connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
+                connection.add_RecoverySucceededAsync (fun _ _ ->
                     task {
-                        onConnectionShutdown logger {
-                            connectionName = config.name
-                            connectionEndpoint = string connection.Endpoint
-                            replyCode = int eventArgs.ReplyCode
-                            replyText = eventArgs.ReplyText
-                        }
+                        logger.LogInformation (
+                            "Connection recovery succeeded. Connected to node endpoint {connectionEndpoint}",
+                            string connection.Endpoint
+                        )
+                    }
+                )
+
+                connection.add_ConnectionRecoveryErrorAsync (fun _ eventArgs ->
+                    onUnexpectedEventAsTask
+                        "connection"
+                        config.name
+                        (UnexpectedException (
+                            eventArgs.Exception,
+                            {
+                                eventName = "ConnectionRecoveryError"
+                                detailFromRabbitMQClient = Map.empty
+                            }
+                        ))
+                )
+
+                connection.add_ConnectionBlockedAsync (fun _ eventArgs ->
+                    task {
+                        logger.LogWarning (
+                            "Connection {connectionName} blocked. Details: {reason}",
+                            config.name,
+                            eventArgs.Reason
+                        )
+                    }
+                )
+
+                connection.add_ConnectionUnblockedAsync (fun _ _ ->
+                    task { logger.LogWarning ("Connection {connectionName} unblocked", config.name) }
+                )
+
+                connection.add_ConnectionShutdownAsync (fun _ (eventArgs: ShutdownEventArgs) ->
+                    task {
+                        let replyCode = int eventArgs.ReplyCode
+
+                        // ReplySuccess (200) is passed when the connection is closed on purpose.
+                        if replyCode = Constants.ReplySuccess then
+                            logger.LogInformation (
+                                "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}",
+                                config.name,
+                                string connection.Endpoint,
+                                replyCode,
+                                eventArgs.ReplyText
+                            )
+
+                        // ConnectionForced (320) is passed when the connected node is restarted on purpose, e.g. upgrade.
+                        else if replyCode = Constants.ConnectionForced then
+                            logger.LogWarning (
+                                "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}. Will try to automatically recovery in {recoveryInterval} seconds",
+                                config.name,
+                                string connection.Endpoint,
+                                replyCode,
+                                eventArgs.ReplyText,
+                                config.recoveryInterval.TotalSeconds
+                            )
+
+                        else
+                            // By throwing we interrupt the recovery interval. The exception will be picked up by `add_CallbackExceptionAsync`.
+                            return
+                                raise (
+                                    Exceptions.OperationInterruptedException (
+                                        eventArgs,
+                                        "RabbitMqClient: Unexpected closed"
+                                    )
+                                )
                     }
                 )
 
                 return
-                    Ok (
-                        Connection connection,
-                        (fun () ->
-                            connection.AbortAsync connectionCloseTimeout
-                            |> Async.AwaitTask
-                            |> Async.RunSynchronously
+                    Connection {
+                        logger = logger
+                        connection = connection
+                        onUnexpectedEvent = onUnexpectedEventAsTask
+                    },
+                    fun () ->
+                        logger.LogInformation (
+                            "Closing connection to node endpoint {connectionEndpoint}",
+                            string connection.Endpoint
                         )
-                    )
+
+                        connection.AbortAsync (System.TimeSpan.FromSeconds 10.)
+                        |> Async.AwaitTask
+                        |> Async.RunSynchronously
 
             with exn ->
-                return Error $"%s{config.name}: Failed to connect to RabbitMQ: %s{string exn}"
+                return
+                    raise (
+                        System.AggregateException (
+                            $"RabbitMqClient.Connection: Failed create connection %s{config.name}",
+                            exn
+                        )
+                    )
         }
         |> Async.AwaitTask
-
-    /// If the connection is unexpectedly closed the system will exit with error code 13.
-    let terminateOnUnexpectedShutdown: OnConnectionShutdown =
-        fun logger event ->
-            // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-            if event.replyCode = Constants.ReplySuccess then
-                logger.LogWarning (
-                    "Closing RabbitMQ connection {connectionName} on node endpoint {connectionEndpoint}",
-                    event.connectionName,
-                    event.connectionEndpoint
-                )
-
-            else if event.replyCode <> Constants.ReplySuccess then
-                logger.LogError (
-                    "Got unexpected event `Shutdown` on connection {connectionName}. {replyCode} - {replyText}. Will terminate the process",
-                    event.connectionName,
-                    event.replyCode,
-                    event.replyText
-                )
-
-                exit 13
 
 module Consumer =
 
     type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * AsyncEventingBasicConsumer
-
-    type Callbacks = {
-        onReceived: ReceivedMessage -> Async<unit>
-        onRegistered: string -> unit
-        onUnregistered: UnregisteredEvent -> unit
-        onShutdown: UnregisteredEvent -> unit
-    }
-
-    and UnregisteredEvent = {
-        queueName: string
-        replyCode: int
-        replyText: string
-    }
-
-    and QueueConfig = {
-        queueName: string
-        bindings: List<QueueBinding>
-        callbacks: Callbacks
-        messageTimeToLive: Option<int>
-        /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
-        prefetchCount: uint16
-        queueType: QueueType
-    }
-
-    and QueueBinding = { exchange: string; routingKey: string }
-
-    and QueueType =
-        | Quorum
-        /// Deprecated. Use `Quorum` instead.
-        | Classic
 
     type ReplyMessage = {
         headers: List<string * string>
@@ -153,6 +250,23 @@ module Consumer =
     and ReplyBody =
         | Json of string
         | Binary of byte[]
+
+    type QueueConfig = {
+        queueName: string
+        bindings: List<QueueBinding>
+        messageTimeToLive: Option<int>
+        /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
+        prefetchCount: uint16
+        queueType: QueueType
+        onReceivedAsync: ReceivedMessage -> Async<unit>
+    }
+
+    and QueueBinding = { exchange: string; routingKey: string }
+
+    and QueueType =
+        | Quorum
+        /// Deprecated. Use `Quorum` instead.
+        | Classic
 
     let ackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
         consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
@@ -239,23 +353,39 @@ module Consumer =
 
     /// <summary>Declares and optionally binds the specified queue, then starts consuming messages.</summary>
     /// <param name="config">Queue configuration.</param>
-    let initAsync (config: QueueConfig) (Connection connection: Connection) : Async<Result<unit, string>> =
+    let initThrowOnErrorAsync (config: QueueConfig) (Connection model: Connection) : Async<unit> =
         task {
             try
-                let! channel = connection.CreateChannelAsync ()
+                let onUnexpectedEvent = model.onUnexpectedEvent "consumer" config.queueName
 
-                do! channel.BasicQosAsync (uint32 0, config.prefetchCount, false)
+                let! channel = model.connection.CreateChannelAsync ()
 
-                channel.add_CallbackExceptionAsync (fun _ _ ->
+                channel.add_CallbackExceptionAsync (fun _ eventArgs ->
+                    onUnexpectedEvent (
+                        UnexpectedException (
+                            eventArgs.Exception,
+                            {
+                                eventName = "CallbackExceptionEvent"
+                                detailFromRabbitMQClient = eventArgs.Detail
+                            }
+                        )
+                    )
+                )
+
+                channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        do!
-                            connection.AbortAsync (
-                                uint16 Constants.ChannelError,
-                                "RabbitMqClient.Consumer: Unhandled channel exception, closing connection",
-                                connectionCloseTimeout
-                            )
+                        if model.connection.IsOpen then
+                            return!
+                                onUnexpectedEvent (
+                                    UnexpectedChannelClosed {
+                                        replyCode = int eventArgs.ReplyCode
+                                        replyText = eventArgs.ReplyText
+                                    }
+                                )
                     }
                 )
+
+                do! channel.BasicQosAsync (uint32 0, config.prefetchCount, false)
 
                 let! _ =
                     channel.QueueDeclareAsync (
@@ -293,41 +423,53 @@ module Consumer =
                 consumer.add_ReceivedAsync (fun _ event ->
                     task {
                         if event.ConsumerTag = consumerTag then
-                            do! config.callbacks.onReceived (ReceivedMessage (event, consumer))
+                            do! config.onReceivedAsync (ReceivedMessage (event, consumer))
+
+                        else
+                            model.logger.LogError (
+                                "Received message with unknown consumer tag {unknownConsumerTag}, expected consumer tag (expectedConsumerTag}",
+                                event.ConsumerTag,
+                                consumerTag
+                            )
                     }
                 )
 
                 consumer.add_RegisteredAsync (fun _ eventArgs ->
                     task {
                         if eventArgs.ConsumerTags |> Array.contains consumerTag then
-                            config.callbacks.onRegistered config.queueName
+                            model.logger.LogInformation (
+                                "Consumer registered on queue {queueName} using tag {consumerTag}",
+                                config.queueName,
+                                consumerTag
+                            )
+
+                        else
+                            model.logger.LogError (
+                                "Consumer registered with unknown consumer tags {unknownConsumerTags}, expected consumer tag (expectedConsumerTag}",
+                                eventArgs.ConsumerTags,
+                                consumerTag
+                            )
                     }
                 )
 
                 consumer.add_UnregisteredAsync (fun _ eventArgs ->
                     task {
                         if eventArgs.ConsumerTags |> Array.contains consumerTag then
-                            let replyCode, replyText =
-                                if consumer.ShutdownReason = null then
-                                    0, "Missing ShutdownReason. Was the queue deleted?"
-                                else
-                                    int consumer.ShutdownReason.ReplyCode, consumer.ShutdownReason.ReplyText
+                            if consumer.Channel.IsOpen then
+                                return!
+                                    onUnexpectedEvent (
+                                        UnexpectedConsumerUnregistered {
+                                            consumerTag = consumerTag
+                                            queueName = config.queueName
+                                        }
+                                    )
 
-                            config.callbacks.onUnregistered {
-                                queueName = config.queueName
-                                replyCode = replyCode
-                                replyText = replyText
-                            }
-                    }
-                )
-
-                consumer.add_ShutdownAsync (fun _ eventArgs ->
-                    task {
-                        config.callbacks.onShutdown {
-                            queueName = config.queueName
-                            replyCode = int eventArgs.ReplyCode
-                            replyText = eventArgs.ReplyText
-                        }
+                        else
+                            model.logger.LogError (
+                                "Consumer unregistered with unknown consumer tags {unknownConsumerTags}, expected consumer tag (expectedConsumerTag}",
+                                eventArgs.ConsumerTags,
+                                consumerTag
+                            )
                     }
                 )
 
@@ -342,66 +484,18 @@ module Consumer =
                         consumer = consumer
                     )
 
-                return Ok ()
+                return ()
 
             with exn ->
-                return Error $"RabbitMqClient.Consumer: %s{string exn}"
+                return
+                    raise (
+                        System.AggregateException (
+                            $"RabbitMqClient.Consumer: Failed to consume queue %s{config.queueName}",
+                            exn
+                        )
+                    )
         }
         |> Async.AwaitTask
-
-    /// <summary>Wrap callbacks with default implementations. Will terminate the process on unexpected events.</summary>
-    /// <param name="logger">Logger.</param>
-    /// <param name="onReceivedAsync">Callback that's called when a new message is received.</param>
-    /// <returns>Callbacks</returns>
-    let terminateOnUnexpectedEvents (logger: ILogger) (onReceivedAsync: ReceivedMessage -> Async<unit>) : Callbacks = {
-        onReceived =
-            fun message ->
-                async {
-                    try
-                        do! onReceivedAsync message
-                    with exn ->
-                        logger.LogError (
-                            exn,
-                            "Got unexpected error during event `Received`. Will terminate the process"
-                        )
-
-                        exit 9
-                }
-
-        onRegistered = fun queueName -> logger.LogInformation ("Consumer registered on queue {queueName}", queueName)
-
-        onUnregistered =
-            fun event ->
-                // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-                if event.replyCode <> Constants.ReplySuccess then
-                    logger.LogError (
-                        "Got unexpected event `Unregistered` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
-                        event.queueName,
-                        event.replyCode,
-                        event.replyText
-                    )
-
-                    exit 11
-
-        onShutdown =
-            fun event ->
-                // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-                if event.replyCode = Constants.ReplySuccess then
-                    logger.LogInformation (
-                        "Got expected event `Shutdown` for consumer on queue {queueName}",
-                        event.queueName
-                    )
-
-                else
-                    logger.LogError (
-                        "Got unexpected event `Shutdown` for consumer on queue {queueName}. {replyCode} - {replyText}. Will terminate the process",
-                        event.queueName,
-                        event.replyCode,
-                        event.replyText
-                    )
-
-                    exit 13
-    }
 
 module RPC =
     open System.Collections.Concurrent
@@ -518,11 +612,7 @@ module RPC =
             }
             |> Async.AwaitTask
 
-    let initAsync
-        (logger: ILogger)
-        (clientName: string)
-        (Connection connection: Connection)
-        : Async<Result<Client, string>> =
+    let initThrowOnErrorAsync (clientName: string) (Connection model: Connection) : Async<Client> =
         task {
             try
                 let pendingRequests: PendingRequests = ConcurrentDictionary ()
@@ -534,15 +624,32 @@ module RPC =
                     + "-consumer-"
                     + System.Guid.NewGuid().ToString ()
 
-                let! channel = connection.CreateChannelAsync ()
+                let onUnexpectedEvent = model.onUnexpectedEvent "RPC consumer" clientName
+
+                let! channel = model.connection.CreateChannelAsync ()
 
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
+                    onUnexpectedEvent (
+                        UnexpectedException (
+                            eventArgs.Exception,
+                            {
+                                eventName = "CallbackExceptionEvent"
+                                detailFromRabbitMQClient = eventArgs.Detail
+                            }
+                        )
+                    )
+                )
+
+                channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        let reason = $"%s{clientName}: Unhandled channel exception, closing connection"
-
-                        logger.LogError (eventArgs.Exception, reason)
-
-                        do! connection.AbortAsync (uint16 Constants.ChannelError, reason, connectionCloseTimeout)
+                        if model.connection.IsOpen then
+                            return!
+                                onUnexpectedEvent (
+                                    UnexpectedChannelClosed {
+                                        replyCode = int eventArgs.ReplyCode
+                                        replyText = eventArgs.ReplyText
+                                    }
+                                )
                     }
                 )
 
@@ -557,15 +664,15 @@ module RPC =
                             let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
 
                             if not (tcs.TrySetResult result) then
-                                logger.LogWarning (
+                                model.logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
                                     clientName,
                                     correlationId
                                 )
 
                         | _ ->
-                            logger.LogWarning (
-                                "Consumer {clientName} received reply without known correlation id: {correlationId}",
+                            model.logger.LogWarning (
+                                "Consumer {clientName} received reply without known correlation id {correlationId}",
                                 clientName,
                                 correlationId
                             )
@@ -574,44 +681,27 @@ module RPC =
 
                 consumer.add_RegisteredAsync (fun _ eventArgs ->
                     task {
-                        logger.LogInformation (
-                            "Consumer {clientName} registered {consumerTags}",
-                            clientName,
-                            eventArgs.ConsumerTags
+                        model.logger.LogInformation (
+                            "Consumer registered on queue {queueName} using tag {consumerTags}",
+                            queueDirectReplyTo,
+                            if eventArgs.ConsumerTags.Length = 1 then
+                                eventArgs.ConsumerTags[0]: obj
+                            else
+                                eventArgs.ConsumerTags
                         )
                     }
                 )
 
-                consumer.add_UnregisteredAsync (fun _ eventArgs ->
+                consumer.add_UnregisteredAsync (fun _ _ ->
                     task {
-                        let replyCode =
-                            if consumer.ShutdownReason = null then
-                                0
-                            else
-                                int consumer.ShutdownReason.ReplyCode
-
-                        // ReplySuccess (200) is passed when we close the connection from the client side, and thus is expected.
-                        if replyCode <> Constants.ReplySuccess then
-                            logger.LogWarning (
-                                "Consumer {clientName} unregistered {consumerTags}",
-                                clientName,
-                                eventArgs.ConsumerTags
-                            )
-                    }
-                )
-
-                consumer.add_ShutdownAsync (fun _ eventArgs ->
-                    task {
-                        if eventArgs.ReplyCode = uint16 Constants.ReplySuccess then
-                            logger.LogInformation ("Got expected event `Shutdown` for {clientName}", clientName)
-
-                        else
-                            logger.LogWarning (
-                                "Got unexpected event `Shutdown` for {clientName}. {replyCode} - {replyText}",
-                                clientName,
-                                eventArgs.ReplyCode,
-                                eventArgs.ReplyText
-                            )
+                        if consumer.Channel.IsOpen then
+                            return!
+                                onUnexpectedEvent (
+                                    UnexpectedConsumerUnregistered {
+                                        consumerTag = consumerTag
+                                        queueName = queueDirectReplyTo
+                                    }
+                                )
                     }
                 )
 
@@ -626,29 +716,31 @@ module RPC =
                         consumer = consumer
                     )
 
-                return
-                    Ok {
-                        requestRawAsync =
-                            requestRawAsync
-                                pendingRequests
-                                consumer
-                                (fun basicProperties body -> {
-                                    headers = basicProperties.Headers
-                                    body = body
-                                })
+                return {
+                    requestRawAsync =
+                        requestRawAsync
+                            pendingRequests
+                            consumer
+                            (fun basicProperties body -> {
+                                headers = basicProperties.Headers
+                                body = body
+                            })
 
-                        requestAsync =
-                            requestRawAsync
-                                pendingRequests
-                                consumer
-                                (fun basicProperties body -> {
-                                    headers = basicProperties.Headers
-                                    body = System.Text.Encoding.UTF8.GetString body
-                                })
-                    }
+                    requestAsync =
+                        requestRawAsync
+                            pendingRequests
+                            consumer
+                            (fun basicProperties body -> {
+                                headers = basicProperties.Headers
+                                body = System.Text.Encoding.UTF8.GetString body
+                            })
+                }
 
             with exn ->
-                return Error (string exn)
+                return
+                    raise (
+                        System.AggregateException ($"RabbitMqClient.RPC: Failed to create client %s{clientName}", exn)
+                    )
         }
         |> Async.AwaitTask
 
@@ -684,20 +776,20 @@ module Publish =
     let private publishAsync (clientName: string) (channel: IChannel) : PublishAsync =
         fun message ->
             task {
-                let messageId = System.Guid.NewGuid().ToString ()
-
-                let contentType, publishBody =
-                    match message.body with
-                    | Json jsonString -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonString
-
-                // The IDictionary implementation must be mutable due to we're using `publisherConfirmationTrackingEnabled`
-                // which adds the header `x-dotnet-pub-seq-no` in the `BasicPublishAsync` call.
-                let requestHeaders =
-                    message.headers
-                    |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                    |> System.Collections.Generic.Dictionary
-
                 try
+                    let messageId = System.Guid.NewGuid().ToString ()
+
+                    let contentType, publishBody =
+                        match message.body with
+                        | Json jsonString -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonString
+
+                    // The IDictionary implementation must be mutable due to we're using `publisherConfirmationTrackingEnabled`
+                    // which adds the header `x-dotnet-pub-seq-no` in the `BasicPublishAsync` call.
+                    let requestHeaders =
+                        message.headers
+                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                        |> System.Collections.Generic.Dictionary
+
                     use cts = new System.Threading.CancellationTokenSource (message.timeout)
 
                     do!
@@ -724,15 +816,13 @@ module Publish =
             }
             |> Async.AwaitTask
 
-    let initAsync
-        (logger: ILogger)
-        (clientName: string)
-        (Connection connection: Connection)
-        : Async<Result<Client, string>> =
+    let initThrowOnErrorAsync (clientName: string) (Connection model: Connection) : Async<Client> =
         task {
             try
+                let onUnexpectedEvent = model.onUnexpectedEvent "publish" clientName
+
                 let! channel =
-                    connection.CreateChannelAsync (
+                    model.connection.CreateChannelAsync (
                         CreateChannelOptions (
                             publisherConfirmationsEnabled = true,
                             publisherConfirmationTrackingEnabled = true
@@ -740,21 +830,38 @@ module Publish =
                     )
 
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
+                    onUnexpectedEvent (
+                        UnexpectedException (
+                            eventArgs.Exception,
+                            {
+                                eventName = "CallbackExceptionEvent"
+                                detailFromRabbitMQClient = eventArgs.Detail
+                            }
+                        )
+                    )
+                )
+
+                channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        let reason = $"%s{clientName}: Unhandled channel exception, closing connection"
-
-                        logger.LogError (eventArgs.Exception, reason)
-
-                        do! connection.AbortAsync (uint16 Constants.ChannelError, reason, connectionCloseTimeout)
+                        if model.connection.IsOpen then
+                            return!
+                                onUnexpectedEvent (
+                                    UnexpectedChannelClosed {
+                                        replyCode = int eventArgs.ReplyCode
+                                        replyText = eventArgs.ReplyText
+                                    }
+                                )
                     }
                 )
 
-                return
-                    Ok {
-                        publishAsync = publishAsync clientName channel
-                    }
+                return {
+                    publishAsync = publishAsync clientName channel
+                }
 
             with exn ->
-                return Error (string exn)
+                return
+                    raise (
+                        System.AggregateException ($"RabbitMqClient.Publish: Failed create client %s{clientName}", exn)
+                    )
         }
         |> Async.AwaitTask
