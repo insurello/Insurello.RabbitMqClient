@@ -30,7 +30,7 @@ and UnexpectedConsumerUnregistered = {
     queueName: string
 }
 
-type CloseConnection = unit -> unit
+type CloseConnectionAsync = System.TimeSpan -> Async<unit>
 
 module Connection =
 
@@ -59,7 +59,7 @@ module Connection =
 
     and Endpoint = { host: string; port: int }
 
-    let initThrowOnErrorAsync (logger: ILogger) (config: Config) : Async<Connection * CloseConnection> =
+    let initThrowOnErrorAsync (logger: ILogger) (config: Config) : Async<Connection * CloseConnectionAsync> =
 
         let onUnexpectedEventAsTask clientTypeName clientName event =
             task {
@@ -191,7 +191,7 @@ module Connection =
                         // ConnectionForced (320) is passed when the connected node is restarted on purpose, e.g. upgrade.
                         else if replyCode = Constants.ConnectionForced then
                             logger.LogWarning (
-                                "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}. Will try to automatically recovery in {recoveryInterval} seconds",
+                                "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}. Will try to automatically recover in {recoveryInterval} seconds",
                                 config.name,
                                 string connection.Endpoint,
                                 replyCode,
@@ -217,15 +217,13 @@ module Connection =
                         connection = connection
                         onUnexpectedEvent = onUnexpectedEventAsTask
                     },
-                    fun () ->
+                    fun (timeout: System.TimeSpan) ->
                         logger.LogInformation (
                             "Closing connection to node endpoint {connectionEndpoint}",
                             string connection.Endpoint
                         )
 
-                        connection.AbortAsync (System.TimeSpan.FromSeconds 10.)
-                        |> Async.AwaitTask
-                        |> Async.RunSynchronously
+                        connection.AbortAsync timeout |> Async.AwaitTask
 
             with exn ->
                 return
@@ -427,7 +425,7 @@ module Consumer =
 
                         else
                             model.logger.LogError (
-                                "Received message with unknown consumer tag {unknownConsumerTag}, expected consumer tag (expectedConsumerTag}",
+                                "Received message with unknown consumer tag {unknownConsumerTag}, expected consumer tag {expectedConsumerTag}",
                                 event.ConsumerTag,
                                 consumerTag
                             )
@@ -445,7 +443,7 @@ module Consumer =
 
                         else
                             model.logger.LogError (
-                                "Consumer registered with unknown consumer tags {unknownConsumerTags}, expected consumer tag (expectedConsumerTag}",
+                                "Consumer registered with unknown consumer tags {unknownConsumerTags}, expected consumer tag {expectedConsumerTag}",
                                 eventArgs.ConsumerTags,
                                 consumerTag
                             )
@@ -466,7 +464,7 @@ module Consumer =
 
                         else
                             model.logger.LogError (
-                                "Consumer unregistered with unknown consumer tags {unknownConsumerTags}, expected consumer tag (expectedConsumerTag}",
+                                "Consumer unregistered with unknown consumer tags {unknownConsumerTags}, expected consumer tag {expectedConsumerTag}",
                                 eventArgs.ConsumerTags,
                                 consumerTag
                             )
