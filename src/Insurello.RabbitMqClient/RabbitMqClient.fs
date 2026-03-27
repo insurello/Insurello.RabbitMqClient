@@ -860,7 +860,10 @@ module Publish =
             with exn ->
                 return
                     raise (
-                        System.AggregateException ($"RabbitMqClient.Publish: Failed to create client %s{clientName}", exn)
+                        System.AggregateException (
+                            $"RabbitMqClient.Publish: Failed to create client %s{clientName}",
+                            exn
+                        )
                     )
         }
         |> Async.AwaitTask
