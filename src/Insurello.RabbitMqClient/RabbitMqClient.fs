@@ -44,7 +44,8 @@ module Connection =
 
         heartbeat: System.TimeSpan
 
-        ///  Amount of time client will wait for before re-trying to recover connection.
+        /// Amount of time client will wait for before re-trying to recover connection.
+        /// Note that this interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
         recoveryInterval: System.TimeSpan
 
         onUnexpectedEventAsync: UnexpectedEvent -> Async<unit>
