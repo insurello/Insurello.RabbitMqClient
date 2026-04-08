@@ -8,22 +8,20 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write  # enable GitHub OIDC token issuance for this job
+      id-token: write # Enable GitHub OIDC token issuance for this job.
 
     steps:
       - uses: actions/checkout@v6
 
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore --warnaserror
-      - run: dotnet pack --configuration Release -o out/Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
+      - name: dotnet pack
+      - run: |
+          mkdir -p out/Release && cp README.md out/Release/
+          dotnet pack --configuration Release --warnaserror --output out/Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
 
-      # Get a short-lived NuGet API key
-      - name: NuGet login (OIDC → temp API key)
-        uses: NuGet/login@v1
+      - uses: NuGet/login@v1
         id: login
         with:
-          user: ${{ secrets.NUGET_USER }} 
-      
-      # Push the package
-      - name: NuGet push
+          user: ${{ secrets.NUGET_USER }}
+
+      - name: dotnet nuget push
         run: dotnet nuget push out/Release/*.nupkg --skip-duplicate --api-key ${{steps.login.outputs.NUGET_API_KEY}} --source https://api.nuget.org/v3/index.json
