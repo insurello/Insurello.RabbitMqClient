@@ -23,5 +23,4 @@ jobs:
           dotnet tool restore
           dotnet fantomas --check src/
 
-      - run: dotnet restore
-      - run: dotnet build --configuration Release --no-restore --warnaserror
+      - run: dotnet build --configuration Release --warnaserror

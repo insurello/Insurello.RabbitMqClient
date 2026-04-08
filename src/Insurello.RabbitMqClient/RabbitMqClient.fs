@@ -32,6 +32,9 @@ and UnexpectedConsumerUnregistered = {
 
 type CloseConnectionAsync = System.TimeSpan -> Async<unit>
 
+type InitException(message: string, cause: exn) =
+    inherit System.Exception(message, cause)
+
 module Connection =
 
     type Config = {
@@ -60,7 +63,9 @@ module Connection =
 
     and Endpoint = { host: string; port: int }
 
-    let initThrowOnErrorAsync (logger: ILogger) (config: Config) : Async<Connection * CloseConnectionAsync> =
+    /// <summary>Initialize a connection against a configured RabbitMQ node endpoint.</summary>
+    /// <exception cref="InitException">On any thrown exception during initialization, e.g. no node endpoints were reachable. The inner exception holds the thrown exception.</exception>
+    let init (logger: ILogger) (config: Config) : Async<Connection> =
 
         let onUnexpectedEventAsTask clientTypeName clientName event =
             task {
@@ -217,29 +222,41 @@ module Connection =
                         logger = logger
                         connection = connection
                         onUnexpectedEvent = onUnexpectedEventAsTask
-                    },
-                    fun (timeout: System.TimeSpan) ->
-                        logger.LogInformation (
-                            "Closing connection to node endpoint {connectionEndpoint}",
-                            string connection.Endpoint
-                        )
-
-                        connection.AbortAsync timeout |> Async.AwaitTask
+                    }
 
             with exn ->
                 return
-                    raise (
-                        System.AggregateException (
-                            $"RabbitMqClient.Connection: Failed create connection %s{config.name}",
-                            exn
-                        )
-                    )
+                    raise (InitException ($"RabbitMqClient.Connection: Failed create connection %s{config.name}", exn))
         }
         |> Async.AwaitTask
 
+    /// <summary>Initialize a connection against a configured RabbitMQ node endpoint.</summary>
+    let tryInit (logger: ILogger) (config: Config) : Async<Result<Connection, InitException>> =
+        async {
+            try
+                let! connection = init logger config
+                return Ok connection
+
+            with :? InitException as exn ->
+                return Error exn
+        }
+
+    /// Closes the connection.
+    let close (closeTimeout: System.TimeSpan) (Connection model) =
+        model.logger.LogInformation (
+            "Closing connection to node endpoint {connectionEndpoint}",
+            string model.connection.Endpoint
+        )
+
+        model.connection.AbortAsync closeTimeout |> Async.AwaitTask
+
 module Consumer =
 
-    type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * AsyncEventingBasicConsumer
+    type Client = private Client of ConsumerModel
+
+    and private ConsumerModel = { consumer: AsyncEventingBasicConsumer }
+
+    type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * ConsumerModel
 
     type ReplyMessage = {
         headers: List<string * string>
@@ -267,92 +284,10 @@ module Consumer =
         /// Deprecated. Use `Quorum` instead.
         | Classic
 
-    let ackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
-        consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
-        |> Async.AwaitTask
-
-    let nackAsync (ReceivedMessage (event, consumer): ReceivedMessage) : Async<unit> =
-        consumer.Channel.BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true).AsTask ()
-        |> Async.AwaitTask
-
-    /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
-    let private nackWithDelayBlockingAsync (delay: System.TimeSpan) : ReceivedMessage -> Async<unit> =
-        fun message ->
-            async {
-                do! Async.Sleep (int delay.TotalMilliseconds |> max 0 |> min System.Int32.MaxValue)
-
-                return! nackAsync message
-            }
-
-    /// The consumed message will be nacked after a specified delay. Will return without waiting for the delay.
-    let nackWithDelayNonBlockingAsync (delay: System.TimeSpan) : ReceivedMessage -> Async<unit> =
-        fun message ->
-            async {
-                // `StartChild` means we share the same `cancellation token`,
-                // so any exceptions should be propagated back to this call.
-                let! _ = nackWithDelayBlockingAsync delay message |> Async.StartChild
-
-                return ()
-            }
-
-    let messageId (ReceivedMessage (event, _): ReceivedMessage) : string = event.BasicProperties.MessageId
-
-    let messageBody (ReceivedMessage (event, _): ReceivedMessage) : string =
-        System.Text.Encoding.UTF8.GetString event.Body.Span
-
-    let messageRoutingKey (ReceivedMessage (event, _): ReceivedMessage) : string = event.RoutingKey
-
-    let replyAsync
-        (ReceivedMessage (eventArgs, consumer): ReceivedMessage)
-        (replyMessage: ReplyMessage)
-        : Async<Result<unit, string>> =
-        task {
-            try
-                match eventArgs.BasicProperties.ReplyTo, eventArgs.BasicProperties.MessageId with
-                | null, _ -> return Error "Missing reply_to property"
-                | _, null -> return Error "Missing message_id property"
-
-                | replyTo, correlationId ->
-                    let messageId = System.Guid.NewGuid().ToString ()
-
-                    let contentType, body =
-                        match replyMessage.body with
-                        | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
-                        | Binary data -> "application/octet-stream", data
-
-                    let headers =
-                        // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
-                        ("sequence_end", "true") :: replyMessage.headers
-                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                        |> System.Collections.Generic.Dictionary
-
-                    do!
-                        consumer.Channel.BasicPublishAsync (
-                            exchange = "",
-                            routingKey = replyTo,
-                            // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
-                            mandatory = false,
-                            basicProperties =
-                                BasicProperties (
-                                    ContentType = contentType,
-                                    Persistent = true,
-                                    MessageId = messageId,
-                                    CorrelationId = correlationId,
-                                    Headers = headers
-                                ),
-                            body = body
-                        )
-
-                    return Ok ()
-
-            with exn ->
-                return Error (string exn)
-        }
-        |> Async.AwaitTask
-
-    /// <summary>Declares and optionally binds the specified queue, then starts consuming messages.</summary>
+    /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
     /// <param name="config">Queue configuration.</param>
-    let initThrowOnErrorAsync (config: QueueConfig) (Connection model: Connection) : Async<unit> =
+    /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
+    let init (config: QueueConfig) (Connection model: Connection) : Async<Client> =
         task {
             try
                 let onUnexpectedEvent = model.onUnexpectedEvent "consumer" config.queueName
@@ -419,10 +354,12 @@ module Consumer =
                 let consumerTag =
                     $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
+                let consumerModel = { consumer = consumer }
+
                 consumer.add_ReceivedAsync (fun _ event ->
                     task {
                         if event.ConsumerTag = consumerTag then
-                            do! config.onReceivedAsync (ReceivedMessage (event, consumer))
+                            do! config.onReceivedAsync (ReceivedMessage (event, consumerModel))
 
                         else
                             model.logger.LogError (
@@ -483,22 +420,130 @@ module Consumer =
                         consumer = consumer
                     )
 
-                return ()
+                return Client consumerModel
 
             with exn ->
                 return
                     raise (
-                        System.AggregateException (
-                            $"RabbitMqClient.Consumer: Failed to consume queue %s{config.queueName}",
-                            exn
-                        )
+                        InitException ($"RabbitMqClient.Consumer: Failed to consume queue %s{config.queueName}", exn)
                     )
+        }
+        |> Async.AwaitTask
+
+    /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
+    /// <param name="config">Queue configuration.</param>
+    let tryInit (config: QueueConfig) (connection: Connection) : Async<Result<Client, InitException>> =
+        async {
+            try
+                let! client = init config connection
+                return Ok client
+
+            with :? InitException as exn ->
+                return Error exn
+        }
+
+    /// Closes the channel consuming messages.
+    let close (Client model: Client) : Async<unit> =
+        model.consumer.Channel.CloseAsync () |> Async.AwaitTask
+
+    let ack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
+        model.consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
+        |> Async.AwaitTask
+
+    let nack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
+        model.consumer.Channel
+            .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
+            .AsTask ()
+        |> Async.AwaitTask
+
+    /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
+    let private nackWithDelayBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
+        async {
+            do! Async.Sleep delay
+
+            return! nack message
+        }
+
+    /// The consumed message will be nacked after a specified delay. Will return without waiting for the delay.
+    let nackWithDelayNonBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
+        async {
+            // `StartChild` means we share the same `cancellation token`,
+            // so any exceptions should be propagated back to this call.
+            let! _ = nackWithDelayBlocking delay message |> Async.StartChild
+
+            return ()
+        }
+
+    let messageId (ReceivedMessage (event, _): ReceivedMessage) : string = event.BasicProperties.MessageId
+
+    let messageBody (ReceivedMessage (event, _): ReceivedMessage) : string =
+        System.Text.Encoding.UTF8.GetString event.Body.Span
+
+    let messageRoutingKey (ReceivedMessage (event, _): ReceivedMessage) : string = event.RoutingKey
+
+    let reply
+        (replyMessage: ReplyMessage)
+        (ReceivedMessage (eventArgs, model): ReceivedMessage)
+        : Async<Result<unit, string>> =
+        task {
+            try
+                match eventArgs.BasicProperties.ReplyTo, eventArgs.BasicProperties.MessageId with
+                | null, _ -> return Error "Missing reply_to property"
+                | _, null -> return Error "Missing message_id property"
+
+                | replyTo, correlationId ->
+                    let messageId = System.Guid.NewGuid().ToString ()
+
+                    let contentType, body =
+                        match replyMessage.body with
+                        | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
+                        | Binary data -> "application/octet-stream", data
+
+                    let headers =
+                        // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
+                        ("sequence_end", "true") :: replyMessage.headers
+                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                        |> System.Collections.Generic.Dictionary
+
+                    do!
+                        model.consumer.Channel.BasicPublishAsync (
+                            exchange = "",
+                            routingKey = replyTo,
+                            // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
+                            mandatory = false,
+                            basicProperties =
+                                BasicProperties (
+                                    ContentType = contentType,
+                                    Persistent = true,
+                                    MessageId = messageId,
+                                    CorrelationId = correlationId,
+                                    Headers = headers
+                                ),
+                            body = body
+                        )
+
+                    return Ok ()
+
+            with exn ->
+                return Error (string exn)
         }
         |> Async.AwaitTask
 
 module RPC =
     open System.Collections.Concurrent
     open System.Threading
+
+    type Client = private Client of RPCModel
+
+    and private RPCModel = {
+        pendingRequests: PendingRequests
+        consumer: AsyncEventingBasicConsumer
+    }
+
+    and private PendingRequests =
+        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], string>>>
+
+    and private CorrelationId = string
 
     type RequestMessage = {
         queue: string
@@ -521,97 +566,12 @@ module RPC =
         headers: ResponseHeaders
     }
 
-    type RequestRawAsync = RequestMessage -> Async<Result<RawResponseMessage, string>>
-
-    type RequestAsync = RequestMessage -> Async<Result<ResponseMessage, string>>
-
-    type Client = {
-        requestRawAsync: RequestRawAsync
-        requestAsync: RequestAsync
-    }
-
-    type private CorrelationId = string
-
-    type private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], string>>>
-
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
 
-    let private requestRawAsync<'response>
-        (pendingRequests: PendingRequests)
-        (consumer: AsyncEventingBasicConsumer)
-        (mapResponse: IReadOnlyBasicProperties -> byte[] -> 'response)
-        : RequestMessage -> Async<Result<'response, string>> =
-        fun message ->
-            task {
-                let messageId = System.Guid.NewGuid().ToString ()
-
-                let completionSource =
-                    TaskCompletionSource<_> TaskCreationOptions.RunContinuationsAsynchronously
-
-                use cancellationSource = new CancellationTokenSource (message.timeout)
-
-                let cancellationCallback () =
-                    // Ensure the  pending request is removed to prevent memory leaks.
-                    pendingRequests.TryRemove messageId |> ignore
-
-                    // Try set error result.
-                    completionSource.TrySetResult (
-                        $"Request to queue '%s{message.queue}' timed out after %s{message.timeout.TotalSeconds.ToString ()}s"
-                        |> Error
-                    )
-                    |> ignore
-
-                // On received reply we will return from this function and `Dispose` will be called.
-                // `Dispose` will cancel the call to the callback.
-                use _cancellationRegistration =
-                    cancellationSource.Token.Register (
-                        callback = cancellationCallback,
-                        useSynchronizationContext = false
-                    )
-
-                try
-                    if pendingRequests.TryAdd (messageId, completionSource) then
-                        let contentType, requestBody =
-                            match message.body with
-                            | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
-
-                        let requestHeaders =
-                            message.headers
-                            |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                            |> System.Collections.Generic.Dictionary
-
-                        do!
-                            consumer.Channel.BasicPublishAsync (
-                                exchange = "",
-                                routingKey = message.queue,
-                                // We don't care if the request message got routed or not as we're using timeout.
-                                mandatory = false,
-                                basicProperties =
-                                    BasicProperties (
-                                        ContentType = contentType,
-                                        Persistent = false,
-                                        MessageId = messageId,
-                                        ReplyTo = queueDirectReplyTo,
-                                        Headers = requestHeaders
-                                    ),
-                                body = requestBody
-                            )
-
-                        match! completionSource.Task with
-                        | Error error -> return Error error
-                        | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
-
-                    else
-                        return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
-
-                with exn ->
-                    return Error (string exn)
-            }
-            |> Async.AwaitTask
-
-    let initThrowOnErrorAsync (clientName: string) (Connection model: Connection) : Async<Client> =
+    /// <summary>Initializes an RPC client.</summary>
+    /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
+    let init (clientName: string) (Connection model: Connection) : Async<Client> =
         task {
             try
                 let pendingRequests: PendingRequests = ConcurrentDictionary ()
@@ -715,33 +675,115 @@ module RPC =
                         consumer = consumer
                     )
 
-                return {
-                    requestRawAsync =
-                        requestRawAsync
-                            pendingRequests
-                            consumer
-                            (fun basicProperties body -> {
-                                headers = basicProperties.Headers
-                                body = body
-                            })
-
-                    requestAsync =
-                        requestRawAsync
-                            pendingRequests
-                            consumer
-                            (fun basicProperties body -> {
-                                headers = basicProperties.Headers
-                                body = System.Text.Encoding.UTF8.GetString body
-                            })
-                }
+                return
+                    Client {
+                        pendingRequests = pendingRequests
+                        consumer = consumer
+                    }
 
             with exn ->
-                return
-                    raise (
-                        System.AggregateException ($"RabbitMqClient.RPC: Failed to create client %s{clientName}", exn)
-                    )
+                return raise (InitException ($"RabbitMqClient.RPC: Failed to create client %s{clientName}", exn))
         }
         |> Async.AwaitTask
+
+    /// <summary>Initializes an RPC client.</summary>
+    let tryInit (clientName: string) (connection: Connection) : Async<Result<Client, InitException>> =
+        async {
+            try
+                let! client = init clientName connection
+                return Ok client
+
+            with :? InitException as exn ->
+                return Error exn
+        }
+
+    let private requestRawInternal<'response>
+        (mapResponse: IReadOnlyBasicProperties -> byte[] -> 'response)
+        (Client model: Client)
+        : RequestMessage -> Async<Result<'response, string>> =
+        fun message ->
+            task {
+                let messageId = System.Guid.NewGuid().ToString ()
+
+                let completionSource =
+                    TaskCompletionSource<_> TaskCreationOptions.RunContinuationsAsynchronously
+
+                use cancellationSource = new CancellationTokenSource (message.timeout)
+
+                let cancellationCallback () =
+                    // Ensure the  pending request is removed to prevent memory leaks.
+                    model.pendingRequests.TryRemove messageId |> ignore
+
+                    // Try set error result.
+                    completionSource.TrySetResult (
+                        $"Request to queue '%s{message.queue}' timed out after %s{string message.timeout.TotalSeconds}s"
+                        |> Error
+                    )
+                    |> ignore
+
+                // On received reply we will return from this function and `Dispose` will be called.
+                // `Dispose` will cancel the call to the callback.
+                use _cancellationRegistration =
+                    cancellationSource.Token.Register (
+                        callback = cancellationCallback,
+                        useSynchronizationContext = false
+                    )
+
+                try
+                    if model.pendingRequests.TryAdd (messageId, completionSource) then
+                        let contentType, requestBody =
+                            match message.body with
+                            | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
+
+                        let requestHeaders =
+                            message.headers
+                            |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                            |> System.Collections.Generic.Dictionary
+
+                        do!
+                            model.consumer.Channel.BasicPublishAsync (
+                                exchange = "",
+                                routingKey = message.queue,
+                                // We don't care if the request message got routed or not as we're using timeout.
+                                mandatory = false,
+                                basicProperties =
+                                    BasicProperties (
+                                        ContentType = contentType,
+                                        Persistent = false,
+                                        MessageId = messageId,
+                                        ReplyTo = queueDirectReplyTo,
+                                        Headers = requestHeaders
+                                    ),
+                                body = requestBody
+                            )
+
+                        match! completionSource.Task with
+                        | Error error -> return Error error
+                        | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+
+                    else
+                        return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
+
+                with exn ->
+                    return Error (string exn)
+            }
+            |> Async.AwaitTask
+
+    let private toRawResponseMessage (basicProperties: IReadOnlyBasicProperties) (body: byte[]) : RawResponseMessage = {
+        headers = basicProperties.Headers
+        body = body
+    }
+
+    let private toResponseMessage (basicProperties: IReadOnlyBasicProperties) (body: byte[]) : ResponseMessage = {
+        headers = basicProperties.Headers
+        body = System.Text.Encoding.UTF8.GetString body
+    }
+
+    let requestRaw (message: RequestMessage) (client: Client) : Async<Result<RawResponseMessage, string>> =
+        message |> requestRawInternal toRawResponseMessage client
+
+    let request (message: RequestMessage) (client: Client) : Async<Result<ResponseMessage, string>> =
+        message |> requestRawInternal toResponseMessage client
 
     let responseHeaderAsString (key: string) (headers: ResponseHeaders) : Option<string> =
         match headers.TryGetValue key with
@@ -764,58 +806,16 @@ module Publish =
 
     and PublishMessageBody = Json of string
 
-    type PublishAsync = PublishMessage -> Async<Result<unit, string>>
+    type Client = private Client of PublishModel
 
-    type Client = { publishAsync: PublishAsync }
+    and private PublishModel = {
+        clientName: string
+        channel: IChannel
+    }
 
-    // References:
-    // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
-    // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
-    // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
-    let private publishAsync (clientName: string) (channel: IChannel) : PublishAsync =
-        fun message ->
-            task {
-                try
-                    let messageId = System.Guid.NewGuid().ToString ()
-
-                    let contentType, publishBody =
-                        match message.body with
-                        | Json jsonString -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonString
-
-                    // The IDictionary implementation must be mutable due to we're using `publisherConfirmationTrackingEnabled`
-                    // which adds the header `x-dotnet-pub-seq-no` in the `BasicPublishAsync` call.
-                    let requestHeaders =
-                        message.headers
-                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                        |> System.Collections.Generic.Dictionary
-
-                    use cts = new System.Threading.CancellationTokenSource (message.timeout)
-
-                    do!
-                        channel.BasicPublishAsync (
-                            exchange = "",
-                            routingKey = message.queue,
-                            body = publishBody,
-                            mandatory = true, // If the queue doesn't exist, a `basic return` is replied.
-                            basicProperties =
-                                BasicProperties (
-                                    ContentType = contentType,
-                                    Persistent = true,
-                                    MessageId = messageId,
-                                    Headers = requestHeaders
-                                ),
-                            cancellationToken = cts.Token
-                        )
-
-                    return Ok ()
-
-                with exn ->
-                    // `BasicPublishAsync` with `publisherConfirmationsEnabled` and `publisherConfirmationTrackingEnabled` indicates `nack` or `basic return` by throwing.
-                    return Error $"%s{clientName}: Failed to publish to queue. Details: %s{string exn}"
-            }
-            |> Async.AwaitTask
-
-    let initThrowOnErrorAsync (clientName: string) (Connection model: Connection) : Async<Client> =
+    /// <summary>Initializes Publish client.</summary>
+    /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
+    let init (clientName: string) (Connection model: Connection) : Async<Client> =
         task {
             try
                 let onUnexpectedEvent = model.onUnexpectedEvent "publish" clientName
@@ -853,17 +853,71 @@ module Publish =
                     }
                 )
 
-                return {
-                    publishAsync = publishAsync clientName channel
-                }
+                return
+                    Client {
+                        clientName = clientName
+                        channel = channel
+                    }
 
             with exn ->
-                return
-                    raise (
-                        System.AggregateException (
-                            $"RabbitMqClient.Publish: Failed to create client %s{clientName}",
-                            exn
-                        )
+                return raise (InitException ($"RabbitMqClient.Publish: Failed to create client %s{clientName}", exn))
+        }
+        |> Async.AwaitTask
+
+    /// <summary>Initializes a Publish client.</summary>
+    let tryInit (clientName: string) (connection: Connection) : Async<Result<Client, InitException>> =
+        async {
+            try
+                let! client = init clientName connection
+                return Ok client
+
+            with :? InitException as exn ->
+                return Error exn
+        }
+
+    /// Publishes a message and awaits publisher confirmation.
+    // References:
+    // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
+    // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
+    // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
+    let publish (message: PublishMessage) (Client model: Client) : Async<Result<unit, string>> =
+        task {
+            try
+                let messageId = System.Guid.NewGuid().ToString ()
+
+                let contentType, publishBody =
+                    match message.body with
+                    | Json jsonString -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonString
+
+                // The IDictionary implementation must be mutable due to we're using `publisherConfirmationTrackingEnabled`
+                // which adds the header `x-dotnet-pub-seq-no` in the `BasicPublishAsync` call.
+                let requestHeaders =
+                    message.headers
+                    |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                    |> System.Collections.Generic.Dictionary
+
+                use cts = new System.Threading.CancellationTokenSource (message.timeout)
+
+                do!
+                    model.channel.BasicPublishAsync (
+                        exchange = "",
+                        routingKey = message.queue,
+                        body = publishBody,
+                        mandatory = true, // If the queue doesn't exist, a `basic return` is replied.
+                        basicProperties =
+                            BasicProperties (
+                                ContentType = contentType,
+                                Persistent = true,
+                                MessageId = messageId,
+                                Headers = requestHeaders
+                            ),
+                        cancellationToken = cts.Token
                     )
+
+                return Ok ()
+
+            with exn ->
+                // `BasicPublishAsync` with `publisherConfirmationsEnabled` and `publisherConfirmationTrackingEnabled` indicates `nack` or `basic return` by throwing.
+                return Error $"%s{model.clientName}: Failed to publish to queue. Details: %s{string exn}"
         }
         |> Async.AwaitTask
