@@ -30,8 +30,6 @@ and UnexpectedConsumerUnregistered = {
     queueName: string
 }
 
-type CloseConnectionAsync = System.TimeSpan -> Async<unit>
-
 type InitException(message: string, cause: exn) =
     inherit System.Exception(message, cause)
 
@@ -285,7 +283,6 @@ module Consumer =
         | Classic
 
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
-    /// <param name="config">Queue configuration.</param>
     /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
     let init (config: QueueConfig) (Connection model: Connection) : Async<Client> =
         task {
@@ -431,7 +428,6 @@ module Consumer =
         |> Async.AwaitTask
 
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
-    /// <param name="config">Queue configuration.</param>
     let tryInit (config: QueueConfig) (connection: Connection) : Async<Result<Client, InitException>> =
         async {
             try
