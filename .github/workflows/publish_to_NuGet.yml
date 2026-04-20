@@ -15,7 +15,6 @@ jobs:
 
       - name: dotnet pack
         run: |
-          mkdir -p Insurello.RabbitMqClient/out/Release && cp README.md Insurello.RabbitMqClient/out/Release/
           dotnet pack --configuration Release --warnaserror --output out/Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
 
       - uses: NuGet/login@v1

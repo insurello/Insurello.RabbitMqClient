@@ -4,6 +4,7 @@
   
     <PackageId>Insurello.RabbitMqClient</PackageId>
     <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
     <Authors>Insurello</Authors>
@@ -40,6 +41,11 @@
     -->
     <WarningsAsErrors>3389,FS0025</WarningsAsErrors>
   </PropertyGroup>
+
+  <!-- README file -->
+  <ItemGroup>
+    <None Include="../../README.md" Pack="true" PackagePath="." />
+  </ItemGroup>
   
   <!-- Source files -->
   <ItemGroup>
