@@ -49,7 +49,7 @@ module Connection =
         /// Note that this interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
         recoveryInterval: System.TimeSpan
 
-        onUnexpectedEventAsync: UnexpectedEvent -> Async<unit>
+        onUnexpectedEvent: UnexpectedEvent -> Async<unit>
     }
 
     and NodeEndpointsConfig = {
@@ -94,7 +94,7 @@ module Connection =
                         details
                     )
 
-                return! config.onUnexpectedEventAsync event
+                return! config.onUnexpectedEvent event
             }
 
         task {
@@ -529,18 +529,6 @@ module RPC =
     open System.Collections.Concurrent
     open System.Threading
 
-    type Client = private Client of RPCModel
-
-    and private RPCModel = {
-        pendingRequests: PendingRequests
-        consumer: AsyncEventingBasicConsumer
-    }
-
-    and private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], string>>>
-
-    and private CorrelationId = string
-
     type RequestMessage = {
         queue: string
         headers: List<string * string>
@@ -561,6 +549,44 @@ module RPC =
         body: string
         headers: ResponseHeaders
     }
+
+    type RequestError =
+        | RequestTimedOut of RequestTimedOutError
+        | ConnectionInRecoveryMode of ConnectionInRecoveryModeError
+        | UnexpectedError of UnexpectedError
+
+    and RequestTimedOutError = {
+        clientName: string
+        toQueue: string
+        withTimeout: System.TimeSpan
+    }
+
+    and ConnectionInRecoveryModeError = {
+        clientName: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        clientName: string
+        thrownException: exn
+    }
+
+    type Client = private Client of RPCModel
+
+    and private RPCModel = {
+        clientName: string
+        pendingRequests: PendingRequests
+        consumer: AsyncEventingBasicConsumer
+    }
+
+    and private PendingRequests =
+        ConcurrentDictionary<
+            CorrelationId,
+            TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], RequestError>>
+         >
+
+    and private CorrelationId = string
 
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
@@ -673,6 +699,7 @@ module RPC =
 
                 return
                     Client {
+                        clientName = clientName
                         pendingRequests = pendingRequests
                         consumer = consumer
                     }
@@ -696,37 +723,42 @@ module RPC =
     let private requestRawInternal<'response>
         (mapResponse: IReadOnlyBasicProperties -> byte[] -> 'response)
         (Client model: Client)
-        : RequestMessage -> Async<Result<'response, string>> =
+        : RequestMessage -> Async<Result<'response, RequestError>> =
         fun message ->
             task {
                 let messageId = System.Guid.NewGuid().ToString ()
 
-                let completionSource =
+                let requestCompletionSource =
                     TaskCompletionSource<_> TaskCreationOptions.RunContinuationsAsynchronously
 
-                use cancellationSource = new CancellationTokenSource (message.timeout)
-
-                let cancellationCallback () =
-                    // Ensure the  pending request is removed to prevent memory leaks.
-                    model.pendingRequests.TryRemove messageId |> ignore
-
-                    // Try set error result.
-                    completionSource.TrySetResult (
-                        $"Request to queue '%s{message.queue}' timed out after %s{string message.timeout.TotalSeconds}s"
-                        |> Error
-                    )
-                    |> ignore
+                use requestTimeoutCancellationTokenSource =
+                    new CancellationTokenSource (message.timeout)
 
                 // On received reply we will return from this function and `Dispose` will be called.
                 // `Dispose` will cancel the call to the callback.
                 use _cancellationRegistration =
-                    cancellationSource.Token.Register (
-                        callback = cancellationCallback,
-                        useSynchronizationContext = false
+                    requestTimeoutCancellationTokenSource.Token.Register (
+                        callback =
+                            fun () ->
+                                // Ensure the  pending request is removed to prevent memory leaks.
+                                model.pendingRequests.TryRemove messageId |> ignore
+
+                                // Try set error result.
+                                requestCompletionSource.TrySetResult (
+                                    Error (
+                                        RequestTimedOut {
+                                            clientName = model.clientName
+                                            toQueue = message.queue
+                                            withTimeout = message.timeout
+                                        }
+                                    )
+                                )
+                                |> ignore
+                        , useSynchronizationContext = false
                     )
 
                 try
-                    if model.pendingRequests.TryAdd (messageId, completionSource) then
+                    if model.pendingRequests.TryAdd (messageId, requestCompletionSource) then
                         let contentType, requestBody =
                             match message.body with
                             | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
@@ -736,6 +768,7 @@ module RPC =
                             |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
                             |> System.Collections.Generic.Dictionary
 
+                        // TODO: Can we promote RabbitMQ.Client.Exceptions.PublishException ?
                         do!
                             model.consumer.Channel.BasicPublishAsync (
                                 exchange = "",
@@ -753,15 +786,40 @@ module RPC =
                                 body = requestBody
                             )
 
-                        match! completionSource.Task with
+                        match! requestCompletionSource.Task with
                         | Error error -> return Error error
                         | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
 
                     else
-                        return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
+                        return
+                            failwith
+                                $"RabbitMqClient.RPC: Message id %s{messageId} already added to pending requests. This should not happen as the message id is a generated UUID and thus should be unique"
 
                 with exn ->
-                    return Error (string exn)
+                    match exn with
+                    | :? Exceptions.AlreadyClosedException as e ->
+                        // `AlreadyClosedException` is thrown when the connection is closed.
+                        // As we enforce connection recovery we can assume the connection is in
+                        // recovery mode when this happens.
+                        return
+                            Error (
+                                ConnectionInRecoveryMode {
+                                    clientName = model.clientName
+                                    replyCode = int e.ShutdownReason.ReplyCode
+                                    replyText = e.ShutdownReason.ReplyText
+                                }
+                            )
+
+                    | _ ->
+                        // Interpret all other exceptions as `UnexpectedError`.
+                        return
+                            Error (
+                                UnexpectedError {
+                                    clientName = model.clientName
+                                    thrownException = exn
+                                }
+                            )
+
             }
             |> Async.AwaitTask
 
@@ -775,10 +833,10 @@ module RPC =
         body = System.Text.Encoding.UTF8.GetString body
     }
 
-    let requestRaw (message: RequestMessage) (client: Client) : Async<Result<RawResponseMessage, string>> =
+    let requestRaw (message: RequestMessage) (client: Client) : Async<Result<RawResponseMessage, RequestError>> =
         message |> requestRawInternal toRawResponseMessage client
 
-    let request (message: RequestMessage) (client: Client) : Async<Result<ResponseMessage, string>> =
+    let request (message: RequestMessage) (client: Client) : Async<Result<ResponseMessage, RequestError>> =
         message |> requestRawInternal toResponseMessage client
 
     let responseHeaderAsString (key: string) (headers: ResponseHeaders) : Option<string> =
@@ -790,6 +848,17 @@ module RPC =
             | _ -> None
 
         | _ -> None
+
+    let requestErrorToString: RequestError -> string =
+        function
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.clientName}: Connection in recovery mode. %d{details.replyCode} - %s{details.replyText}"
+
+        | RequestTimedOut details ->
+            $"%s{details.clientName}: Request to queue %s{details.toQueue} timed out after %d{int details.withTimeout.TotalSeconds} seconds"
+
+        | UnexpectedError details ->
+            $"%s{details.clientName}: Unexpected exception. Details: %s{details.thrownException.ToString ()}"
 
 module Publish =
 

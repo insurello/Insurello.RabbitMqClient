@@ -24,7 +24,7 @@
 
   <ItemGroup>
     <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink. It's only used while building. -->
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.201" PrivateAssets="All" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.202" PrivateAssets="All" />
   </ItemGroup>
 
   <PropertyGroup>
@@ -49,6 +49,6 @@
   <!-- Dependencies -->
   <ItemGroup>
     <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.5" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.6" />
   </ItemGroup>
 </Project>
