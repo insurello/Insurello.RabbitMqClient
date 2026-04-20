@@ -793,7 +793,7 @@ module RPC =
                     else
                         return
                             failwith
-                                $"RabbitMqClient.RPC: Message id %s{messageId} already added to pending requests. This should not happen as the message id is a generated UUID and thus should be unique"
+                                $"%s{model.clientName}: Message id %s{messageId} already added to pending requests. This should not happen as the message id is a generated UUID and thus should be unique"
 
                 with exn ->
                     match exn with
