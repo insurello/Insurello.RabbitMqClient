@@ -28,6 +28,9 @@ jobs:
       # TODO: Remove
       - name: dotnet pack
         run: |
-          ls -lA
           mkdir -p ./out/Release && cp README.md ./out/Release
+          ls -lA
           dotnet pack --configuration Release --warnaserror --output ./out/Release
+          ls -lA
+          ls -lA ./out
+          ls -lA ./out/Release
