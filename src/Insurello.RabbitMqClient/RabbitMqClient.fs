@@ -252,7 +252,11 @@ module Consumer =
 
     type Client = private Client of ConsumerModel
 
-    and private ConsumerModel = { consumer: AsyncEventingBasicConsumer }
+    and private ConsumerModel = {
+        consumer: AsyncEventingBasicConsumer
+        consumedQueue: string
+        logger: ILogger
+    }
 
     type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * ConsumerModel
 
@@ -305,7 +309,9 @@ module Consumer =
 
                 channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        if model.connection.IsOpen then
+                        let replyCode = int eventArgs.ReplyCode
+
+                        if not (replyCode = Constants.ConnectionForced || replyCode = Constants.ReplySuccess) then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedChannelClosed {
@@ -351,7 +357,11 @@ module Consumer =
                 let consumerTag =
                     $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
-                let consumerModel = { consumer = consumer }
+                let consumerModel = {
+                    consumer = consumer
+                    consumedQueue = config.queueName
+                    logger = model.logger
+                }
 
                 consumer.add_ReceivedAsync (fun _ event ->
                     task {
@@ -443,14 +453,37 @@ module Consumer =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
     let ack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
-        model.consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
-        |> Async.AwaitTask
+        async {
+            try
+                do!
+                    model.consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
+                    |> Async.AwaitTask
+
+            with :? Exceptions.AlreadyClosedException as exn ->
+                model.logger.LogWarning (
+                    exn,
+                    "Unable to ack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
+                    event.BasicProperties.MessageId,
+                    model.consumedQueue
+                )
+        }
 
     let nack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
-        model.consumer.Channel
-            .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
-            .AsTask ()
-        |> Async.AwaitTask
+        async {
+            try
+                do!
+                    model.consumer.Channel
+                        .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
+                        .AsTask ()
+                    |> Async.AwaitTask
+            with :? Exceptions.AlreadyClosedException as exn ->
+                model.logger.LogWarning (
+                    exn,
+                    "Unable to nack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
+                    event.BasicProperties.MessageId,
+                    model.consumedQueue
+                )
+        }
 
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
     let private nackWithDelayBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
