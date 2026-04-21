@@ -643,10 +643,7 @@ module RPC =
     }
 
     and private PendingRequests =
-        ConcurrentDictionary<
-            CorrelationId,
-            TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], RequestError>>
-         >
+        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Option<IReadOnlyBasicProperties * byte[]>>>
 
     and private CorrelationId = string
 
@@ -709,10 +706,10 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            // Ensure the message body is copied.
-                            let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
+                            // Ensure the message body is copied before setting the response.
+                            let response = Some (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
 
-                            if not (tcs.TrySetResult result) then
+                            if not (tcs.TrySetResult response) then
                                 model.logger.LogWarning (
                                     "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
                                     clientName,
@@ -741,10 +738,9 @@ module RPC =
                     }
                 )
 
-                // TODO: Test with delay from RPC
+                // TODO: How can we promote add_UnregisteredAsync after successful connection recovery? Like for Consumer clients.
                 consumer.add_UnregisteredAsync (fun _ _ ->
                     task {
-                        // TODO: Add wasChannelShutdownBeforeUnregistered?
                         if consumer.Channel.IsOpen then
                             return!
                                 onUnexpectedEvent (
@@ -813,17 +809,8 @@ module RPC =
                                 // Ensure the  pending request is removed to prevent memory leaks.
                                 model.pendingRequests.TryRemove messageId |> ignore
 
-                                // Try set error result.
-                                requestCompletionSource.TrySetResult (
-                                    Error (
-                                        RequestTimedOut {
-                                            clientName = model.clientName
-                                            toQueue = message.queue
-                                            withTimeout = message.timeout
-                                        }
-                                    )
-                                )
-                                |> ignore
+                                // Try set timed out response.
+                                requestCompletionSource.TrySetResult None |> ignore
                         , useSynchronizationContext = false
                     )
 
@@ -855,9 +842,19 @@ module RPC =
                                 body = requestBody
                             )
 
+                        // Wait until response received, or timed out (None).
                         match! requestCompletionSource.Task with
-                        | Error error -> return Error error
-                        | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+                        | None ->
+                            return
+                                Error (
+                                    RequestTimedOut {
+                                        clientName = model.clientName
+                                        toQueue = message.queue
+                                        withTimeout = message.timeout
+                                    }
+                                )
+
+                        | Some (basicProperties, body) -> return Ok (mapResponse basicProperties body)
 
                     else
                         return
