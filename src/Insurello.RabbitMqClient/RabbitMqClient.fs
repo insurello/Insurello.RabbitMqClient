@@ -916,11 +916,11 @@ module RPC =
 
     let requestErrorToString: RequestError -> string =
         function
-        | ConnectionInRecoveryMode details ->
-            $"%s{details.clientName}: Connection in recovery mode. %d{details.replyCode} - %s{details.replyText}"
-
         | RequestTimedOut details ->
             $"%s{details.clientName}: Request to queue %s{details.toQueue} timed out after %d{int details.withTimeout.TotalSeconds} seconds"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.clientName}: Connection in recovery mode. %d{details.replyCode} - %s{details.replyText}"
 
         | UnexpectedError details ->
             $"%s{details.clientName}: Unexpected exception. Details: %s{details.thrownException.ToString ()}"
@@ -936,6 +936,30 @@ module Publish =
 
     and PublishMessageBody = Json of string
 
+    type PublishError =
+        | PublishTimedOut of PublishTimedOutError
+        | PublishReturnError of PublishErrorDetails
+        | ConnectionInRecoveryMode of PublishErrorDetails
+        | UnexpectedError of UnexpectedError
+
+    and PublishTimedOutError = {
+        clientName: string
+        toQueue: string
+        withTimeout: System.TimeSpan
+    }
+
+    and PublishErrorDetails = {
+        clientName: string
+        toQueue: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        clientName: string
+        thrownException: exn
+    }
+
     type Client = private Client of PublishModel
 
     and private PublishModel = {
@@ -950,6 +974,7 @@ module Publish =
             try
                 let onUnexpectedEvent = model.onUnexpectedEvent "publish" clientName
 
+                // Create channel with publisher confirmations enabled.
                 let! channel =
                     model.connection.CreateChannelAsync (
                         CreateChannelOptions (
@@ -1015,7 +1040,7 @@ module Publish =
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
     // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
-    let publish (message: PublishMessage) (Client model: Client) : Async<Result<unit, string>> =
+    let publish (message: PublishMessage) (Client model: Client) : Async<Result<unit, PublishError>> =
         task {
             try
                 let messageId = System.Guid.NewGuid().ToString ()
@@ -1051,11 +1076,65 @@ module Publish =
 
                 return Ok ()
 
-            with exn ->
-                // TODO: Catch AlreadyClosedException and create error type.
-                // TODO: Catch RabbitMQ.Client.Exceptions.PublishException and create error type.
+            with
+            | :? Exceptions.AlreadyClosedException as e ->
+                // `AlreadyClosedException` is thrown when the connection is closed.
+                // As we enforce connection recovery we can assume the connection is in
+                // recovery mode when this happens.
+                return
+                    Error (
+                        ConnectionInRecoveryMode {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            replyCode = int e.ShutdownReason.ReplyCode
+                            replyText = e.ShutdownReason.ReplyText
+                        }
+                    )
 
-                // `BasicPublishAsync` with `publisherConfirmationsEnabled` and `publisherConfirmationTrackingEnabled` indicates `nack` or `basic return` by throwing.
-                return Error $"%s{model.clientName}: Failed to publish to queue. Details: %s{string exn}"
+            | :? Exceptions.PublishReturnException as exn ->
+                // `PublishReturnException` is thrown is the queue couldn't be routed or the confirmation failed.
+                return
+                    Error (
+                        PublishReturnError {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            replyCode = int exn.ReplyCode
+                            replyText = exn.ReplyText
+                        }
+                    )
+
+            | :? TaskCanceledException ->
+                // `TaskCanceledException` is thrown when the CancellationTokenSource (cts) is run.
+                return
+                    Error (
+                        PublishTimedOut {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            withTimeout = message.timeout
+                        }
+                    )
+
+            | exn ->
+                return
+                    Error (
+                        UnexpectedError {
+                            clientName = model.clientName
+                            thrownException = exn
+                        }
+                    )
         }
         |> Async.AwaitTask
+
+    let publishErrorToString: PublishError -> string =
+        function
+        | PublishTimedOut details ->
+            $"%s{details.clientName}: Publish to queue %s{details.toQueue} timed out after %d{int details.withTimeout.TotalSeconds} seconds"
+
+        | PublishReturnError details ->
+            $"%s{details.clientName}: Publish to queue %s{details.toQueue} returned with error. %d{details.replyCode} - %s{details.replyText}"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.clientName}: Connection in recovery mode while trying to publish to queue %s{details.toQueue}. %d{details.replyCode} - %s{details.replyText}"
+
+        | UnexpectedError details ->
+            $"%s{details.clientName}: Unexpected exception. Details: %s{details.thrownException.ToString ()}"
