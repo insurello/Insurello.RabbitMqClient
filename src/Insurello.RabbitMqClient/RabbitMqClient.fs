@@ -258,7 +258,15 @@ module Consumer =
         logger: ILogger
     }
 
-    type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * ConsumerModel
+    type ReceivedMessage = private ReceivedMessage of ReceivedMessageData * ConsumerModel
+
+    and private ReceivedMessageData = {
+        deliveryTag: uint64
+        routingKey: string
+        messageId: string
+        replyTo: string
+        body: string
+    }
 
     type ReplyMessage = {
         headers: List<string * string>
@@ -276,7 +284,7 @@ module Consumer =
         /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
         prefetchCount: uint16
         queueType: QueueType
-        onReceivedAsync: ReceivedMessage -> Async<unit>
+        onMessageReceived: ReceivedMessage -> Async<unit>
     }
 
     and QueueBinding = { exchange: string; routingKey: string }
@@ -285,6 +293,29 @@ module Consumer =
         | Quorum
         /// Deprecated. Use `Quorum` instead.
         | Classic
+
+    type ReplyError =
+        | UnableToReply of UnableToReplyError
+        | ConnectionInRecoveryMode of ConnectionInRecoveryModeError
+        | UnexpectedError of UnexpectedError
+
+    and UnableToReplyError = {
+        consumedQueue: string
+        reason: string
+    }
+
+    and ConnectionInRecoveryModeError = {
+        consumedQueue: string
+        replyToQueue: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        consumedQueue: string
+        replyToQueue: string
+        thrownException: exn
+    }
 
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
     /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
@@ -378,15 +409,28 @@ module Consumer =
                     logger = model.logger
                 }
 
-                consumer.add_ReceivedAsync (fun _ event ->
+                consumer.add_ReceivedAsync (fun _ eventArgs ->
                     task {
-                        if event.ConsumerTag = consumerTag then
-                            do! config.onReceivedAsync (ReceivedMessage (event, consumerModel))
+                        if eventArgs.ConsumerTag = consumerTag then
+                            do!
+                                config.onMessageReceived (
+                                    ReceivedMessage (
+                                        {
+                                            deliveryTag = eventArgs.DeliveryTag
+                                            routingKey = eventArgs.RoutingKey
+                                            messageId = eventArgs.BasicProperties.MessageId
+                                            replyTo = eventArgs.BasicProperties.ReplyTo
+                                            // Ensure the message body is copied.
+                                            body = System.Text.Encoding.UTF8.GetString eventArgs.Body.Span
+                                        },
+                                        consumerModel
+                                    )
+                                )
 
                         else
                             model.logger.LogError (
                                 "Received message with unknown consumer tag {unknownConsumerTag}, expected consumer tag {expectedConsumerTag}",
-                                event.ConsumerTag,
+                                eventArgs.ConsumerTag,
                                 consumerTag
                             )
                     }
@@ -475,11 +519,11 @@ module Consumer =
     let close (Client model: Client) : Async<unit> =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
-    let ack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
+    let ack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
         async {
             try
                 do!
-                    model.consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
+                    model.consumer.Channel.BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false).AsTask ()
                     |> Async.AwaitTask
 
             with :? Exceptions.AlreadyClosedException as exn ->
@@ -488,17 +532,17 @@ module Consumer =
                 model.logger.LogWarning (
                     exn,
                     "Unable to ack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
-                    event.BasicProperties.MessageId,
+                    message.messageId,
                     model.consumedQueue
                 )
         }
 
-    let nack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
+    let nack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
         async {
             try
                 do!
                     model.consumer.Channel
-                        .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
+                        .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
                         .AsTask ()
                     |> Async.AwaitTask
 
@@ -508,7 +552,7 @@ module Consumer =
                 model.logger.LogWarning (
                     exn,
                     "Unable to nack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
-                    event.BasicProperties.MessageId,
+                    message.messageId,
                     model.consumedQueue
                 )
         }
@@ -531,25 +575,38 @@ module Consumer =
             return ()
         }
 
-    let messageId (ReceivedMessage (event, _): ReceivedMessage) : string = event.BasicProperties.MessageId
+    let messageId (ReceivedMessage (message, _): ReceivedMessage) : string = message.messageId
 
-    // TODO: Ensure message body is copied
-    let messageBody (ReceivedMessage (event, _): ReceivedMessage) : string =
-        System.Text.Encoding.UTF8.GetString event.Body.Span
+    let messageBody (ReceivedMessage (message, _): ReceivedMessage) : string = message.body
 
-    let messageRoutingKey (ReceivedMessage (event, _): ReceivedMessage) : string = event.RoutingKey
+    let messageRoutingKey (ReceivedMessage (message, _): ReceivedMessage) : string = message.routingKey
 
     let reply
         (replyMessage: ReplyMessage)
-        (ReceivedMessage (eventArgs, model): ReceivedMessage)
-        : Async<Result<unit, string>> =
+        (ReceivedMessage (message, model): ReceivedMessage)
+        : Async<Result<unit, ReplyError>> =
         task {
-            try
-                match eventArgs.BasicProperties.ReplyTo, eventArgs.BasicProperties.MessageId with
-                | null, _ -> return Error "Missing reply_to property"
-                | _, null -> return Error "Missing message_id property"
+            match message.replyTo, message.messageId with
+            | null, _ ->
+                return
+                    Error (
+                        UnableToReply {
+                            consumedQueue = model.consumedQueue
+                            reason = "Missing `reply_to` message property"
+                        }
+                    )
 
-                | replyTo, correlationId ->
+            | _, null ->
+                return
+                    Error (
+                        UnableToReply {
+                            consumedQueue = model.consumedQueue
+                            reason = "Missing `message_id` message property to be used as correlation id"
+                        }
+                    )
+
+            | replyTo, correlationId ->
+                try
                     let messageId = System.Guid.NewGuid().ToString ()
 
                     let contentType, body =
@@ -582,10 +639,42 @@ module Consumer =
 
                     return Ok ()
 
-            with exn ->
-                return Error (string exn)
+                with
+                | :? Exceptions.AlreadyClosedException as exn ->
+                    // `AlreadyClosedException` is thrown when the connection is closed.
+                    // As we enforce connection recovery we can assume the connection is in
+                    // recovery mode when this happens.
+                    return
+                        Error (
+                            ConnectionInRecoveryMode {
+                                consumedQueue = model.consumedQueue
+                                replyToQueue = replyTo
+                                replyCode = int exn.ShutdownReason.ReplyCode
+                                replyText = exn.ShutdownReason.ReplyText
+                            }
+                        )
+
+                | exn ->
+                    return
+                        Error (
+                            UnexpectedError {
+                                consumedQueue = model.consumedQueue
+                                replyToQueue = replyTo
+                                thrownException = exn
+                            }
+                        )
         }
         |> Async.AwaitTask
+
+    let replyErrorToString: ReplyError -> string =
+        function
+        | UnableToReply details -> $"%s{details.consumedQueue}: Unable to reply. Details: %s{details.reason}"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.consumedQueue}: Connection in recovery mode while trying to reply to %s{details.replyToQueue}. %d{details.replyCode} - %s{details.replyText}"
+
+        | UnexpectedError details ->
+            $"%s{details.consumedQueue}: Unexpected exception while replying to %s{details.replyToQueue}. Details: %s{details.thrownException.ToString ()}"
 
 module RPC =
     open System.Collections.Concurrent
@@ -862,7 +951,7 @@ module RPC =
                                 $"%s{model.clientName}: Message id %s{messageId} already added to pending requests. This should not happen as the message id is a generated UUID and thus should be unique"
 
                 with
-                | :? Exceptions.AlreadyClosedException as e ->
+                | :? Exceptions.AlreadyClosedException as exn ->
                     // `AlreadyClosedException` is thrown when the connection is closed.
                     // As we enforce connection recovery we can assume the connection is in
                     // recovery mode when this happens.
@@ -870,8 +959,8 @@ module RPC =
                         Error (
                             ConnectionInRecoveryMode {
                                 clientName = model.clientName
-                                replyCode = int e.ShutdownReason.ReplyCode
-                                replyText = e.ShutdownReason.ReplyText
+                                replyCode = int exn.ShutdownReason.ReplyCode
+                                replyText = exn.ShutdownReason.ReplyText
                             }
                         )
 
