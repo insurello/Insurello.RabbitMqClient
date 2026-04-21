@@ -757,6 +757,12 @@ module RPC =
 
                 let! channel = model.connection.CreateChannelAsync ()
 
+                // When the unregistered callback is run the connection recovery may have already succeed.
+                // And to be able to different between expected unregistrations, due to connection recovery,
+                // and unexpected unregistrations, where the queue is removed, we track if the channel was closed
+                // prior to an unregistration. We clear this flag after the unregistration is handled.
+                let mutable wasChannelShutdownBeforeUnregistered = false
+
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
                     onUnexpectedEvent (
                         UnexpectedException (
@@ -771,6 +777,10 @@ module RPC =
 
                 channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
+                        // We assume this callback is run before the unregistered callback,
+                        // and ignore any thread race conditions because of that.
+                        wasChannelShutdownBeforeUnregistered <- true
+
                         let replyCode = int eventArgs.ReplyCode
 
                         // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
@@ -800,7 +810,7 @@ module RPC =
 
                             if not (tcs.TrySetResult response) then
                                 model.logger.LogWarning (
-                                    "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
+                                    "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}. Probably due to already timed out",
                                     clientName,
                                     correlationId
                                 )
@@ -827,10 +837,17 @@ module RPC =
                     }
                 )
 
-                // TODO: How can we promote add_UnregisteredAsync after successful connection recovery? Like for Consumer clients.
                 consumer.add_UnregisteredAsync (fun _ _ ->
                     task {
-                        if consumer.Channel.IsOpen then
+                        // If the consumer became unregistered without a channel shutdown
+                        // it probably means the queue was deleted, which is unexpected.
+                        let isUnexpected = not wasChannelShutdownBeforeUnregistered
+
+                        // Once we know if the unregistration is expected or not, clear the flag.
+                        // We assume this is called after channel shutdown and ignore any thread race conditions because of that.
+                        wasChannelShutdownBeforeUnregistered <- false
+
+                        if isUnexpected then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedConsumerUnregistered {
