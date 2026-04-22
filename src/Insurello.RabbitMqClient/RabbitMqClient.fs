@@ -344,7 +344,7 @@ module Consumer =
 
                 let! channel = model.connection.CreateChannelAsync ()
 
-                // When the unregistered callback is run the connection recovery may have already succeed.
+                // When the unregistered callback is run the connection recovery may have already succeeded.
                 // And to be able to different between expected unregistrations, due to connection recovery,
                 // and unexpected unregistrations, where the queue is removed, we track if the channel was closed
                 // prior to an unregistration. We clear this flag after the unregistration is handled.
@@ -775,7 +775,7 @@ module RPC =
 
                 let! channel = model.connection.CreateChannelAsync ()
 
-                // When the unregistered callback is run the connection recovery may have already succeed.
+                // When the unregistered callback is run the connection recovery may have already succeeded.
                 // And to be able to different between expected unregistrations, due to connection recovery,
                 // and unexpected unregistrations, where the queue is removed, we track if the channel was closed
                 // prior to an unregistration. We clear this flag after the unregistration is handled.
@@ -930,7 +930,7 @@ module RPC =
                     requestTimeoutCancellationTokenSource.Token.Register (
                         callback =
                             fun () ->
-                                // Ensure the  pending request is removed to prevent memory leaks.
+                                // Ensure the pending request is removed to prevent memory leaks.
                                 model.pendingRequests.TryRemove messageId |> ignore
 
                                 // Try set timed out response.
@@ -983,7 +983,7 @@ module RPC =
                     else
                         return
                             failwith
-                                $"%s{model.clientName}: Message id %s{messageId} already added to pending requests. This should not happen as the message id is a generated UUID and thus should be unique"
+                                $"%s{model.clientName}: Message id %s{messageId} already added to pending requests. This shouldn't happen as the message id is a generated UUID and thus should be unique"
 
                 with
                 | :? Exceptions.AlreadyClosedException as exn ->
@@ -1216,7 +1216,7 @@ module Publish =
                     )
 
             | :? Exceptions.PublishReturnException as exn ->
-                // `PublishReturnException` is thrown is the queue couldn't be routed or the confirmation failed.
+                // `PublishReturnException` is thrown if the queue couldn't be routed or the confirmation failed.
                 return
                     Error (
                         PublishReturnError {
