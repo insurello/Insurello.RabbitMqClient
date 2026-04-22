@@ -45,8 +45,26 @@ module Connection =
 
         heartbeat: System.TimeSpan
 
-        /// Amount of time client will wait for before retrying to recover the connection.
-        /// Note that this interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
+        /// <summary>Amount of time to wait for before retrying to recover a lost connection. Please **read all important notes** below on how to pick this value.</summary>
+        /// <remarks>
+        /// <list>
+        /// <item>
+        /// <term>Important note 1</term>
+        /// <description>
+        /// During connection recovery any in-flight messages will be "returned" to the RabbitMQ nodes (brokers) and upon successful recovery may be consumed again immediately.
+        /// The previous message might not even be processed completely before the same message is handled again.
+        /// This means that **all** consumers must support handling the same message **multiple times**, possible at almost the **same time**.
+        /// Increasing this interval will make it less likely to happen with the tradeoff of being unresponsive for a longer timer.
+        /// </description>
+        /// </item>
+        /// <item>
+        /// <term>Important note 2</term>
+        /// <description>
+        /// This interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
+        /// </description>
+        /// </item>
+        /// </list>
+        /// </remarks>
         recoveryInterval: System.TimeSpan
 
         onUnexpectedEvent: UnexpectedEvent -> Async<unit>
