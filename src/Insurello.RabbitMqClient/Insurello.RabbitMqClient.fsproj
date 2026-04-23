@@ -15,7 +15,7 @@
   
     <!-- Source Link configuration -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <!-- FsAutoComplete doesn't support embedded sources so we only use source link -->
+    <!-- FsAutoComplete doesn't support embedded sources so we rely on GitHub source links instead -->
     <EmbedSources>false</EmbedSources>
 
     <!-- Embed symbols containing Source Link in the main file (exe/dll) -->
