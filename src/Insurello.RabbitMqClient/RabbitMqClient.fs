@@ -30,7 +30,7 @@ and UnexpectedConsumerUnregistered = {
     queueName: string
 }
 
-type InitException(message: string, cause: exn) =
+type InitException internal (message: string, cause: exn) =
     inherit System.Exception(message, cause)
 
 module Connection =
@@ -45,11 +45,27 @@ module Connection =
 
         heartbeat: System.TimeSpan
 
-        /// Amount of time client will wait for before retrying to recover the connection.
-        /// Note that this interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
+        /// <summary>Amount of time to wait for before retrying to recover a lost connection. Please <b>read all important notes</b> below on how to pick this value.</summary>
+        /// <remarks>
+        /// <list>
+        /// <item>
+        /// <description>
+        /// <b>Important note 1:</b> During connection recovery any in-flight messages will be "returned" to the RabbitMQ nodes (brokers) and will be up for consuming again.
+        /// Upon successful recovery the message may be consumed again even though the current handling of the message isn't finished.
+        /// This means that <b>all</b> consumers must support handling the same message <b>multiple times</b>, possible at almost the <b>same time</b>.
+        /// Increasing this interval will make it less likely to happen with the tradeoff of being unresponsive for a longer time.
+        /// </description>
+        /// </item>
+        /// <item>
+        /// <description>
+        /// <b>Important note 2:</b> This interval is also used as the connection timeout during recovery, if the value is too low it will result in <c>connection.start was never received, likely due to a network timeout</c> errors.
+        /// </description>
+        /// </item>
+        /// </list>
+        /// </remarks>
         recoveryInterval: System.TimeSpan
 
-        onUnexpectedEventAsync: UnexpectedEvent -> Async<unit>
+        onUnexpectedEvent: UnexpectedEvent -> Async<unit>
     }
 
     and NodeEndpointsConfig = {
@@ -61,7 +77,7 @@ module Connection =
 
     and Endpoint = { host: string; port: int }
 
-    /// <summary>Initialize a connection against a configured RabbitMQ node endpoint.</summary>
+    /// <summary>Initialize a connection against one of the configured RabbitMQ node endpoints.</summary>
     /// <exception cref="InitException">On any thrown exception during initialization, e.g. no node endpoints were reachable. The inner exception holds the thrown exception.</exception>
     let init (logger: ILogger) (config: Config) : Async<Connection> =
 
@@ -94,7 +110,7 @@ module Connection =
                         details
                     )
 
-                return! config.onUnexpectedEventAsync event
+                return! config.onUnexpectedEvent event
             }
 
         task {
@@ -178,11 +194,11 @@ module Connection =
                     task { logger.LogWarning ("Connection {connectionName} unblocked", config.name) }
                 )
 
-                connection.add_ConnectionShutdownAsync (fun _ (eventArgs: ShutdownEventArgs) ->
+                connection.add_ConnectionShutdownAsync (fun _ eventArgs ->
                     task {
                         let replyCode = int eventArgs.ReplyCode
 
-                        // ReplySuccess (200) is passed when the connection is closed on purpose.
+                        // ReplySuccess (200) is (usually) passed when the connection is closed from current running program.
                         if replyCode = Constants.ReplySuccess then
                             logger.LogInformation (
                                 "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}",
@@ -192,7 +208,7 @@ module Connection =
                                 eventArgs.ReplyText
                             )
 
-                        // ConnectionForced (320) is passed when the connected node is restarted on purpose, e.g. upgrade.
+                        // ConnectionForced (320) is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
                         else if replyCode = Constants.ConnectionForced then
                             logger.LogWarning (
                                 "Connection {connectionName} on node endpoint {connectionEndpoint} closed. {replyCode} - {replyText}. Will try to automatically recover in {recoveryInterval} seconds",
@@ -209,7 +225,7 @@ module Connection =
                                 raise (
                                     Exceptions.OperationInterruptedException (
                                         eventArgs,
-                                        "RabbitMqClient: Unexpected closed"
+                                        "RabbitMqClient.Connection: Unexpected closed"
                                     )
                                 )
                     }
@@ -228,7 +244,7 @@ module Connection =
         }
         |> Async.AwaitTask
 
-    /// <summary>Initialize a connection against a configured RabbitMQ node endpoint.</summary>
+    /// <summary>Initialize a connection against one of the configured RabbitMQ node endpoints.</summary>
     let tryInit (logger: ILogger) (config: Config) : Async<Result<Connection, InitException>> =
         async {
             try
@@ -252,9 +268,21 @@ module Consumer =
 
     type Client = private Client of ConsumerModel
 
-    and private ConsumerModel = { consumer: AsyncEventingBasicConsumer }
+    and private ConsumerModel = {
+        consumer: AsyncEventingBasicConsumer
+        consumedQueue: string
+        logger: ILogger
+    }
 
-    type ReceivedMessage = private ReceivedMessage of BasicDeliverEventArgs * ConsumerModel
+    type ReceivedMessage = private ReceivedMessage of ReceivedMessageData * ConsumerModel
+
+    and private ReceivedMessageData = {
+        deliveryTag: uint64
+        routingKey: string
+        messageId: string
+        replyTo: string
+        body: string
+    }
 
     type ReplyMessage = {
         headers: List<string * string>
@@ -272,7 +300,7 @@ module Consumer =
         /// Maximum number of unacked messages to be fetched at once. The messages will still be processed one at a time.
         prefetchCount: uint16
         queueType: QueueType
-        onReceivedAsync: ReceivedMessage -> Async<unit>
+        onMessageReceived: ReceivedMessage -> Async<unit>
     }
 
     and QueueBinding = { exchange: string; routingKey: string }
@@ -282,6 +310,29 @@ module Consumer =
         /// Deprecated. Use `Quorum` instead.
         | Classic
 
+    type ReplyError =
+        | UnableToReply of UnableToReplyError
+        | ConnectionInRecoveryMode of ConnectionInRecoveryModeError
+        | UnexpectedError of UnexpectedError
+
+    and UnableToReplyError = {
+        consumedQueue: string
+        reason: string
+    }
+
+    and ConnectionInRecoveryModeError = {
+        consumedQueue: string
+        replyToQueue: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        consumedQueue: string
+        replyToQueue: string
+        thrownException: exn
+    }
+
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
     /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
     let init (config: QueueConfig) (Connection model: Connection) : Async<Client> =
@@ -290,6 +341,12 @@ module Consumer =
                 let onUnexpectedEvent = model.onUnexpectedEvent "consumer" config.queueName
 
                 let! channel = model.connection.CreateChannelAsync ()
+
+                // When the unregistered callback is run the connection recovery may have already succeeded.
+                // And to be able to different between expected unregistrations, due to connection recovery,
+                // and unexpected unregistrations, where the queue is removed, we track if the channel was closed
+                // prior to an unregistration. We clear this flag after the unregistration is handled.
+                let mutable wasChannelShutdownBeforeUnregistered = false
 
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
                     onUnexpectedEvent (
@@ -305,11 +362,20 @@ module Consumer =
 
                 channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        if model.connection.IsOpen then
+                        // We assume this callback is run before the unregistered callback,
+                        // and ignore any thread race conditions because of that.
+                        wasChannelShutdownBeforeUnregistered <- true
+
+                        let replyCode = int eventArgs.ReplyCode
+
+                        // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
+                        // ReplySuccess is (usually) passed when the connection is closed from current running program.
+                        // ConnectionForced is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
+                        if not (replyCode = Constants.ReplySuccess || replyCode = Constants.ConnectionForced) then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedChannelClosed {
-                                        replyCode = int eventArgs.ReplyCode
+                                        replyCode = replyCode
                                         replyText = eventArgs.ReplyText
                                     }
                                 )
@@ -318,23 +384,25 @@ module Consumer =
 
                 do! channel.BasicQosAsync (uint32 0, config.prefetchCount, false)
 
+                let queueDeclareArguments =
+                    dict [
+                        "x-queue-type",
+                        match config.queueType with
+                        | Quorum -> "quorum"
+                        | Classic -> "classic"
+                        :> obj
+
+                        if config.messageTimeToLive.IsSome then
+                            "x-message-ttl", config.messageTimeToLive.Value
+                    ]
+
                 let! _ =
                     channel.QueueDeclareAsync (
                         queue = config.queueName,
                         durable = true,
                         exclusive = false,
                         autoDelete = false,
-                        arguments =
-                            dict (
-                                ("x-queue-type",
-                                 match config.queueType with
-                                 | Quorum -> "quorum"
-                                 | Classic -> "classic"
-                                 :> obj)
-                                :: (config.messageTimeToLive
-                                    |> Option.map (fun ttl -> [ "x-message-ttl", ttl :> obj ])
-                                    |> Option.defaultValue [])
-                            )
+                        arguments = queueDeclareArguments
                     )
 
                 for queueBinding in config.bindings do
@@ -351,17 +419,34 @@ module Consumer =
                 let consumerTag =
                     $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
-                let consumerModel = { consumer = consumer }
+                let consumerModel = {
+                    consumer = consumer
+                    consumedQueue = config.queueName
+                    logger = model.logger
+                }
 
-                consumer.add_ReceivedAsync (fun _ event ->
+                consumer.add_ReceivedAsync (fun _ eventArgs ->
                     task {
-                        if event.ConsumerTag = consumerTag then
-                            do! config.onReceivedAsync (ReceivedMessage (event, consumerModel))
+                        if eventArgs.ConsumerTag = consumerTag then
+                            do!
+                                config.onMessageReceived (
+                                    ReceivedMessage (
+                                        {
+                                            deliveryTag = eventArgs.DeliveryTag
+                                            routingKey = eventArgs.RoutingKey
+                                            messageId = eventArgs.BasicProperties.MessageId
+                                            replyTo = eventArgs.BasicProperties.ReplyTo
+                                            // Ensure the message body is copied.
+                                            body = System.Text.Encoding.UTF8.GetString eventArgs.Body.Span
+                                        },
+                                        consumerModel
+                                    )
+                                )
 
                         else
                             model.logger.LogError (
                                 "Received message with unknown consumer tag {unknownConsumerTag}, expected consumer tag {expectedConsumerTag}",
-                                event.ConsumerTag,
+                                eventArgs.ConsumerTag,
                                 consumerTag
                             )
                     }
@@ -388,7 +473,15 @@ module Consumer =
                 consumer.add_UnregisteredAsync (fun _ eventArgs ->
                     task {
                         if eventArgs.ConsumerTags |> Array.contains consumerTag then
-                            if consumer.Channel.IsOpen then
+                            // If the consumer became unregistered without a channel shutdown
+                            // it probably means the queue was deleted, which is unexpected.
+                            let isUnexpected = not wasChannelShutdownBeforeUnregistered
+
+                            // Once we know if the unregistration is expected or not, clear the flag.
+                            // We assume this is called after channel shutdown and ignore any thread race conditions because of that.
+                            wasChannelShutdownBeforeUnregistered <- false
+
+                            if isUnexpected then
                                 return!
                                     onUnexpectedEvent (
                                         UnexpectedConsumerUnregistered {
@@ -442,15 +535,43 @@ module Consumer =
     let close (Client model: Client) : Async<unit> =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
-    let ack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
-        model.consumer.Channel.BasicAckAsync(deliveryTag = event.DeliveryTag, multiple = false).AsTask ()
-        |> Async.AwaitTask
+    let ack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
+        async {
+            try
+                do!
+                    model.consumer.Channel.BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false).AsTask ()
+                    |> Async.AwaitTask
 
-    let nack (ReceivedMessage (event, model): ReceivedMessage) : Async<unit> =
-        model.consumer.Channel
-            .BasicNackAsync(deliveryTag = event.DeliveryTag, multiple = false, requeue = true)
-            .AsTask ()
-        |> Async.AwaitTask
+            with :? Exceptions.AlreadyClosedException as exn ->
+                // `AlreadyClosedException` is thrown when the connection is closed.
+                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
+                model.logger.LogWarning (
+                    exn,
+                    "Unable to ack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
+                    message.messageId,
+                    model.consumedQueue
+                )
+        }
+
+    let nack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
+        async {
+            try
+                do!
+                    model.consumer.Channel
+                        .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
+                        .AsTask ()
+                    |> Async.AwaitTask
+
+            with :? Exceptions.AlreadyClosedException as exn ->
+                // `AlreadyClosedException` is thrown when the connection is closed.
+                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
+                model.logger.LogWarning (
+                    exn,
+                    "Unable to nack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
+                    message.messageId,
+                    model.consumedQueue
+                )
+        }
 
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
     let private nackWithDelayBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
@@ -470,24 +591,38 @@ module Consumer =
             return ()
         }
 
-    let messageId (ReceivedMessage (event, _): ReceivedMessage) : string = event.BasicProperties.MessageId
+    let messageId (ReceivedMessage (message, _): ReceivedMessage) : string = message.messageId
 
-    let messageBody (ReceivedMessage (event, _): ReceivedMessage) : string =
-        System.Text.Encoding.UTF8.GetString event.Body.Span
+    let messageBody (ReceivedMessage (message, _): ReceivedMessage) : string = message.body
 
-    let messageRoutingKey (ReceivedMessage (event, _): ReceivedMessage) : string = event.RoutingKey
+    let messageRoutingKey (ReceivedMessage (message, _): ReceivedMessage) : string = message.routingKey
 
     let reply
         (replyMessage: ReplyMessage)
-        (ReceivedMessage (eventArgs, model): ReceivedMessage)
-        : Async<Result<unit, string>> =
+        (ReceivedMessage (message, model): ReceivedMessage)
+        : Async<Result<unit, ReplyError>> =
         task {
-            try
-                match eventArgs.BasicProperties.ReplyTo, eventArgs.BasicProperties.MessageId with
-                | null, _ -> return Error "Missing reply_to property"
-                | _, null -> return Error "Missing message_id property"
+            match message.replyTo, message.messageId with
+            | null, _ ->
+                return
+                    Error (
+                        UnableToReply {
+                            consumedQueue = model.consumedQueue
+                            reason = "Missing `reply_to` message property"
+                        }
+                    )
 
-                | replyTo, correlationId ->
+            | _, null ->
+                return
+                    Error (
+                        UnableToReply {
+                            consumedQueue = model.consumedQueue
+                            reason = "Missing `message_id` message property to be used as correlation id"
+                        }
+                    )
+
+            | replyTo, correlationId ->
+                try
                     let messageId = System.Guid.NewGuid().ToString ()
 
                     let contentType, body =
@@ -520,26 +655,46 @@ module Consumer =
 
                     return Ok ()
 
-            with exn ->
-                return Error (string exn)
+                with
+                | :? Exceptions.AlreadyClosedException as exn ->
+                    // `AlreadyClosedException` is thrown when the connection is closed.
+                    // As we enforce connection recovery we can assume the connection is in
+                    // recovery mode when this happens.
+                    return
+                        Error (
+                            ConnectionInRecoveryMode {
+                                consumedQueue = model.consumedQueue
+                                replyToQueue = replyTo
+                                replyCode = int exn.ShutdownReason.ReplyCode
+                                replyText = exn.ShutdownReason.ReplyText
+                            }
+                        )
+
+                | exn ->
+                    return
+                        Error (
+                            UnexpectedError {
+                                consumedQueue = model.consumedQueue
+                                replyToQueue = replyTo
+                                thrownException = exn
+                            }
+                        )
         }
         |> Async.AwaitTask
+
+    let replyErrorToString: ReplyError -> string =
+        function
+        | UnableToReply details -> $"%s{details.consumedQueue}: Unable to reply. Details: %s{details.reason}"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.consumedQueue}: Connection in recovery mode while trying to reply to %s{details.replyToQueue}. %d{details.replyCode} - %s{details.replyText}"
+
+        | UnexpectedError details ->
+            $"%s{details.consumedQueue}: Unexpected exception while replying to %s{details.replyToQueue}. Details: %s{details.thrownException.ToString ()}"
 
 module RPC =
     open System.Collections.Concurrent
     open System.Threading
-
-    type Client = private Client of RPCModel
-
-    and private RPCModel = {
-        pendingRequests: PendingRequests
-        consumer: AsyncEventingBasicConsumer
-    }
-
-    and private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Result<IReadOnlyBasicProperties * byte[], string>>>
-
-    and private CorrelationId = string
 
     type RequestMessage = {
         queue: string
@@ -562,6 +717,41 @@ module RPC =
         headers: ResponseHeaders
     }
 
+    type RequestError =
+        | RequestTimedOut of RequestTimedOutError
+        | ConnectionInRecoveryMode of ConnectionInRecoveryModeError
+        | UnexpectedError of UnexpectedError
+
+    and RequestTimedOutError = {
+        clientName: string
+        toQueue: string
+        withTimeout: System.TimeSpan
+    }
+
+    and ConnectionInRecoveryModeError = {
+        clientName: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        clientName: string
+        thrownException: exn
+    }
+
+    type Client = private Client of RPCModel
+
+    and private RPCModel = {
+        clientName: string
+        pendingRequests: PendingRequests
+        consumer: AsyncEventingBasicConsumer
+    }
+
+    and private PendingRequests =
+        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Option<IReadOnlyBasicProperties * byte[]>>>
+
+    and private CorrelationId = string
+
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
 
@@ -583,6 +773,12 @@ module RPC =
 
                 let! channel = model.connection.CreateChannelAsync ()
 
+                // When the unregistered callback is run the connection recovery may have already succeeded.
+                // And to be able to different between expected unregistrations, due to connection recovery,
+                // and unexpected unregistrations, where the queue is removed, we track if the channel was closed
+                // prior to an unregistration. We clear this flag after the unregistration is handled.
+                let mutable wasChannelShutdownBeforeUnregistered = false
+
                 channel.add_CallbackExceptionAsync (fun _ eventArgs ->
                     onUnexpectedEvent (
                         UnexpectedException (
@@ -597,11 +793,20 @@ module RPC =
 
                 channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        if model.connection.IsOpen then
+                        // We assume this callback is run before the unregistered callback,
+                        // and ignore any thread race conditions because of that.
+                        wasChannelShutdownBeforeUnregistered <- true
+
+                        let replyCode = int eventArgs.ReplyCode
+
+                        // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
+                        // ReplySuccess is (usually) passed when the connection is closed from current running program.
+                        // ConnectionForced is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
+                        if not (replyCode = Constants.ReplySuccess || replyCode = Constants.ConnectionForced) then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedChannelClosed {
-                                        replyCode = int eventArgs.ReplyCode
+                                        replyCode = replyCode
                                         replyText = eventArgs.ReplyText
                                     }
                                 )
@@ -616,11 +821,12 @@ module RPC =
 
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
-                            let result = Ok (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
+                            // Ensure the message body is copied before setting the response.
+                            let response = Some (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
 
-                            if not (tcs.TrySetResult result) then
+                            if not (tcs.TrySetResult response) then
                                 model.logger.LogWarning (
-                                    "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}",
+                                    "Consumer {clientName} received reply but unable to set task completion source with correlation id {correlationId}. Probably due to already timed out",
                                     clientName,
                                     correlationId
                                 )
@@ -649,7 +855,15 @@ module RPC =
 
                 consumer.add_UnregisteredAsync (fun _ _ ->
                     task {
-                        if consumer.Channel.IsOpen then
+                        // If the consumer became unregistered without a channel shutdown
+                        // it probably means the queue was deleted, which is unexpected.
+                        let isUnexpected = not wasChannelShutdownBeforeUnregistered
+
+                        // Once we know if the unregistration is expected or not, clear the flag.
+                        // We assume this is called after channel shutdown and ignore any thread race conditions because of that.
+                        wasChannelShutdownBeforeUnregistered <- false
+
+                        if isUnexpected then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedConsumerUnregistered {
@@ -673,6 +887,7 @@ module RPC =
 
                 return
                     Client {
+                        clientName = clientName
                         pendingRequests = pendingRequests
                         consumer = consumer
                     }
@@ -696,37 +911,33 @@ module RPC =
     let private requestRawInternal<'response>
         (mapResponse: IReadOnlyBasicProperties -> byte[] -> 'response)
         (Client model: Client)
-        : RequestMessage -> Async<Result<'response, string>> =
+        : RequestMessage -> Async<Result<'response, RequestError>> =
         fun message ->
             task {
                 let messageId = System.Guid.NewGuid().ToString ()
 
-                let completionSource =
+                let requestCompletionSource =
                     TaskCompletionSource<_> TaskCreationOptions.RunContinuationsAsynchronously
 
-                use cancellationSource = new CancellationTokenSource (message.timeout)
-
-                let cancellationCallback () =
-                    // Ensure the  pending request is removed to prevent memory leaks.
-                    model.pendingRequests.TryRemove messageId |> ignore
-
-                    // Try set error result.
-                    completionSource.TrySetResult (
-                        $"Request to queue '%s{message.queue}' timed out after %s{string message.timeout.TotalSeconds}s"
-                        |> Error
-                    )
-                    |> ignore
+                use requestTimeoutCancellationTokenSource =
+                    new CancellationTokenSource (message.timeout)
 
                 // On received reply we will return from this function and `Dispose` will be called.
                 // `Dispose` will cancel the call to the callback.
                 use _cancellationRegistration =
-                    cancellationSource.Token.Register (
-                        callback = cancellationCallback,
-                        useSynchronizationContext = false
+                    requestTimeoutCancellationTokenSource.Token.Register (
+                        callback =
+                            fun () ->
+                                // Ensure the pending request is removed to prevent memory leaks.
+                                model.pendingRequests.TryRemove messageId |> ignore
+
+                                // Try set timed out response.
+                                requestCompletionSource.TrySetResult None |> ignore
+                        , useSynchronizationContext = false
                     )
 
                 try
-                    if model.pendingRequests.TryAdd (messageId, completionSource) then
+                    if model.pendingRequests.TryAdd (messageId, requestCompletionSource) then
                         let contentType, requestBody =
                             match message.body with
                             | Json json -> "application/json", System.Text.Encoding.UTF8.GetBytes json
@@ -753,15 +964,49 @@ module RPC =
                                 body = requestBody
                             )
 
-                        match! completionSource.Task with
-                        | Error error -> return Error error
-                        | Ok (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+                        // Wait until response received, or timed out (None).
+                        match! requestCompletionSource.Task with
+                        | None ->
+                            return
+                                Error (
+                                    RequestTimedOut {
+                                        clientName = model.clientName
+                                        toQueue = message.queue
+                                        withTimeout = message.timeout
+                                    }
+                                )
+
+                        | Some (basicProperties, body) -> return Ok (mapResponse basicProperties body)
 
                     else
-                        return Error $"RabbitMqClient.RPC: Duplicate message id %s{messageId}"
+                        return
+                            failwith
+                                $"%s{model.clientName}: Message id %s{messageId} already added to pending requests. This shouldn't happen as the message id is a generated UUID and thus should be unique"
 
-                with exn ->
-                    return Error (string exn)
+                with
+                | :? Exceptions.AlreadyClosedException as exn ->
+                    // `AlreadyClosedException` is thrown when the connection is closed.
+                    // As we enforce connection recovery we can assume the connection is in
+                    // recovery mode when this happens.
+                    return
+                        Error (
+                            ConnectionInRecoveryMode {
+                                clientName = model.clientName
+                                replyCode = int exn.ShutdownReason.ReplyCode
+                                replyText = exn.ShutdownReason.ReplyText
+                            }
+                        )
+
+                | exn ->
+                    // Interpret all other exceptions as `UnexpectedError`.
+                    return
+                        Error (
+                            UnexpectedError {
+                                clientName = model.clientName
+                                thrownException = exn
+                            }
+                        )
+
             }
             |> Async.AwaitTask
 
@@ -775,10 +1020,10 @@ module RPC =
         body = System.Text.Encoding.UTF8.GetString body
     }
 
-    let requestRaw (message: RequestMessage) (client: Client) : Async<Result<RawResponseMessage, string>> =
+    let requestRaw (message: RequestMessage) (client: Client) : Async<Result<RawResponseMessage, RequestError>> =
         message |> requestRawInternal toRawResponseMessage client
 
-    let request (message: RequestMessage) (client: Client) : Async<Result<ResponseMessage, string>> =
+    let request (message: RequestMessage) (client: Client) : Async<Result<ResponseMessage, RequestError>> =
         message |> requestRawInternal toResponseMessage client
 
     let responseHeaderAsString (key: string) (headers: ResponseHeaders) : Option<string> =
@@ -791,6 +1036,17 @@ module RPC =
 
         | _ -> None
 
+    let requestErrorToString: RequestError -> string =
+        function
+        | RequestTimedOut details ->
+            $"%s{details.clientName}: Request to queue %s{details.toQueue} timed out after %d{int details.withTimeout.TotalSeconds} seconds"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.clientName}: Connection in recovery mode. %d{details.replyCode} - %s{details.replyText}"
+
+        | UnexpectedError details ->
+            $"%s{details.clientName}: Unexpected exception. Details: %s{details.thrownException.ToString ()}"
+
 module Publish =
 
     type PublishMessage = {
@@ -801,6 +1057,30 @@ module Publish =
     }
 
     and PublishMessageBody = Json of string
+
+    type PublishError =
+        | PublishTimedOut of PublishTimedOutError
+        | PublishReturnError of PublishErrorDetails
+        | ConnectionInRecoveryMode of PublishErrorDetails
+        | UnexpectedError of UnexpectedError
+
+    and PublishTimedOutError = {
+        clientName: string
+        toQueue: string
+        withTimeout: System.TimeSpan
+    }
+
+    and PublishErrorDetails = {
+        clientName: string
+        toQueue: string
+        replyCode: int
+        replyText: string
+    }
+
+    and UnexpectedError = {
+        clientName: string
+        thrownException: exn
+    }
 
     type Client = private Client of PublishModel
 
@@ -816,6 +1096,7 @@ module Publish =
             try
                 let onUnexpectedEvent = model.onUnexpectedEvent "publish" clientName
 
+                // Create channel with publisher confirmations enabled.
                 let! channel =
                     model.connection.CreateChannelAsync (
                         CreateChannelOptions (
@@ -838,11 +1119,16 @@ module Publish =
 
                 channel.add_ChannelShutdownAsync (fun _ eventArgs ->
                     task {
-                        if model.connection.IsOpen then
+                        let replyCode = int eventArgs.ReplyCode
+
+                        // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
+                        // ReplySuccess is (usually) passed when the connection is closed from current running program.
+                        // ConnectionForced is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
+                        if not (replyCode = Constants.ReplySuccess || replyCode = Constants.ConnectionForced) then
                             return!
                                 onUnexpectedEvent (
                                     UnexpectedChannelClosed {
-                                        replyCode = int eventArgs.ReplyCode
+                                        replyCode = replyCode
                                         replyText = eventArgs.ReplyText
                                     }
                                 )
@@ -876,7 +1162,7 @@ module Publish =
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/issues/1818
     // https://github.com/rabbitmq/rabbitmq-dotnet-client/blob/87a4788e54cfb0745dd7b6e6a3456c2e1fa23b23/projects/Applications/PublisherConfirms/PublisherConfirms.cs
     // https://github.com/lukebakken/rabbitmq-dotnet-client-1721/blob/eae2aff74d2f2eca2e3e32e3d1a5f01aee461ef8/Program.cs
-    let publish (message: PublishMessage) (Client model: Client) : Async<Result<unit, string>> =
+    let publish (message: PublishMessage) (Client model: Client) : Async<Result<unit, PublishError>> =
         task {
             try
                 let messageId = System.Guid.NewGuid().ToString ()
@@ -912,8 +1198,65 @@ module Publish =
 
                 return Ok ()
 
-            with exn ->
-                // `BasicPublishAsync` with `publisherConfirmationsEnabled` and `publisherConfirmationTrackingEnabled` indicates `nack` or `basic return` by throwing.
-                return Error $"%s{model.clientName}: Failed to publish to queue. Details: %s{string exn}"
+            with
+            | :? Exceptions.AlreadyClosedException as e ->
+                // `AlreadyClosedException` is thrown when the connection is closed.
+                // As we enforce connection recovery we can assume the connection is in
+                // recovery mode when this happens.
+                return
+                    Error (
+                        ConnectionInRecoveryMode {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            replyCode = int e.ShutdownReason.ReplyCode
+                            replyText = e.ShutdownReason.ReplyText
+                        }
+                    )
+
+            | :? Exceptions.PublishReturnException as exn ->
+                // `PublishReturnException` is thrown if the queue couldn't be routed or the confirmation failed.
+                return
+                    Error (
+                        PublishReturnError {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            replyCode = int exn.ReplyCode
+                            replyText = exn.ReplyText
+                        }
+                    )
+
+            | :? TaskCanceledException ->
+                // `TaskCanceledException` is thrown when the CancellationTokenSource (cts) is run.
+                return
+                    Error (
+                        PublishTimedOut {
+                            clientName = model.clientName
+                            toQueue = message.queue
+                            withTimeout = message.timeout
+                        }
+                    )
+
+            | exn ->
+                return
+                    Error (
+                        UnexpectedError {
+                            clientName = model.clientName
+                            thrownException = exn
+                        }
+                    )
         }
         |> Async.AwaitTask
+
+    let publishErrorToString: PublishError -> string =
+        function
+        | PublishTimedOut details ->
+            $"%s{details.clientName}: Publish to queue %s{details.toQueue} timed out after %d{int details.withTimeout.TotalSeconds} seconds"
+
+        | PublishReturnError details ->
+            $"%s{details.clientName}: Publish to queue %s{details.toQueue} returned with error. %d{details.replyCode} - %s{details.replyText}"
+
+        | ConnectionInRecoveryMode details ->
+            $"%s{details.clientName}: Connection in recovery mode while trying to publish to queue %s{details.toQueue}. %d{details.replyCode} - %s{details.replyText}"
+
+        | UnexpectedError details ->
+            $"%s{details.clientName}: Unexpected exception. Details: %s{details.thrownException.ToString ()}"
