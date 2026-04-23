@@ -15,7 +15,7 @@ jobs:
 
       - name: dotnet pack
         run: |
-          dotnet pack --configuration Release --warnaserror --output out/Release -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
+          dotnet pack --configuration Release --warnaserror --output out/Release -p:ContinuousIntegrationBuild=true -p:EmbedAllSources=true -p:DeterministicSourcePaths=true -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
 
       - uses: NuGet/login@v1
         id: login
