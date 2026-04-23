@@ -45,22 +45,20 @@ module Connection =
 
         heartbeat: System.TimeSpan
 
-        /// <summary>Amount of time to wait for before retrying to recover a lost connection. Please **read all important notes** below on how to pick this value.</summary>
+        /// <summary>Amount of time to wait for before retrying to recover a lost connection. Please <b>read all important notes</b> below on how to pick this value.</summary>
         /// <remarks>
         /// <list>
         /// <item>
-        /// <term>Important note 1</term>
         /// <description>
-        /// During connection recovery any in-flight messages will be "returned" to the RabbitMQ nodes (brokers) and upon successful recovery may be consumed again immediately.
-        /// The previous message might not even be processed completely before the same message is handled again.
-        /// This means that **all** consumers must support handling the same message **multiple times**, possible at almost the **same time**.
-        /// Increasing this interval will make it less likely to happen with the tradeoff of being unresponsive for a longer timer.
+        /// <b>Important note 1:</b> During connection recovery any in-flight messages will be "returned" to the RabbitMQ nodes (brokers) and will be up for consuming again.
+        /// Upon successful recovery the message may be consumed again even though the current handling of the message isn't finished.
+        /// This means that <b>all</b> consumers must support handling the same message <b>multiple times</b>, possible at almost the <b>same time</b>.
+        /// Increasing this interval will make it less likely to happen with the tradeoff of being unresponsive for a longer time.
         /// </description>
         /// </item>
         /// <item>
-        /// <term>Important note 2</term>
         /// <description>
-        /// This interval is also used as the connection timeout during recovery, if the value is too low it will result in `connection.start was never received, likely due to a network timeout` errors.
+        /// <b>Important note 2:</b> This interval is also used as the connection timeout during recovery, if the value is too low it will result in <c>connection.start was never received, likely due to a network timeout</c> errors.
         /// </description>
         /// </item>
         /// </list>
