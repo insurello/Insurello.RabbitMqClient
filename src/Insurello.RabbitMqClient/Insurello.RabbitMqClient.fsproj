@@ -15,7 +15,8 @@
   
     <!-- Source Link configuration -->
     <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <EmbedSources>true</EmbedSources>
+    <!-- FsAutoComplete doesn't support EmbededSource so we only use source link -->
+    <EmbedSources>false</EmbedSources>
 
     <!-- Embed symbols containing Source Link in the main file (exe/dll) -->
     <DebugType>embedded</DebugType>
