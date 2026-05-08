@@ -5,7 +5,6 @@ open RabbitMQ.Client
 open RabbitMQ.Client.Events
 open System.Threading.Tasks
 
-[<NoComparison; NoEquality>]
 type Connection =
     private
     | Connection of ConnectionModel
@@ -23,7 +22,7 @@ type Connection =
                 |> Async.AwaitTask
                 |> Async.RunSynchronously
 
-and [<NoComparison; NoEquality>] private ConnectionModel = {
+and private ConnectionModel = {
     logger: ILogger
     connection: IConnection
     closeTimeout: System.TimeSpan
@@ -35,7 +34,7 @@ and UnexpectedEvent =
     | UnexpectedChannelClosed of UnexpectedChannelClosedDetails
     | UnexpectedConsumerUnregistered of UnexpectedConsumerUnregistered
 
-and [<NoComparison; NoEquality>] UnexpectedExceptionDetails = {
+and UnexpectedExceptionDetails = {
     eventName: string
     detailFromRabbitMQClient: System.Collections.Generic.IDictionary<string, obj>
 }
@@ -52,7 +51,6 @@ type InitException internal (message: string, cause: exn) =
 
 module Connection =
 
-    [<NoComparison; NoEquality>]
     type Config = {
         /// Application-specific connection name, will be displayed in the management UI.
         name: string
@@ -282,16 +280,14 @@ module Connection =
 
 module Consumer =
 
-    [<NoComparison; NoEquality>]
     type Client = private Client of ConsumerModel
 
-    and [<NoComparison; NoEquality>] private ConsumerModel = {
+    and private ConsumerModel = {
         consumer: AsyncEventingBasicConsumer
         consumedQueue: string
         logger: ILogger
     }
 
-    [<NoComparison; NoEquality>]
     type ReceivedMessage = private ReceivedMessage of ReceivedMessageData * ConsumerModel
 
     and private ReceivedMessageData = {
@@ -311,7 +307,6 @@ module Consumer =
         | Json of string
         | Binary of byte[]
 
-    [<NoComparison; NoEquality>]
     type QueueConfig = {
         queueName: string
         bindings: List<QueueBinding>
@@ -758,10 +753,9 @@ module RPC =
         thrownException: exn
     }
 
-    [<NoComparison; NoEquality>]
     type Client = private Client of RPCModel
 
-    and [<NoComparison; NoEquality>] private RPCModel = {
+    and private RPCModel = {
         clientName: string
         pendingRequests: PendingRequests
         consumer: AsyncEventingBasicConsumer
@@ -1102,10 +1096,9 @@ module Publish =
         thrownException: exn
     }
 
-    [<NoComparison; NoEquality>]
     type Client = private Client of PublishModel
 
-    and [<NoComparison; NoEquality>] private PublishModel = {
+    and private PublishModel = {
         clientName: string
         channel: IChannel
     }
