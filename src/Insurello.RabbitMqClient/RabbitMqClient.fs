@@ -5,11 +5,28 @@ open RabbitMQ.Client
 open RabbitMQ.Client.Events
 open System.Threading.Tasks
 
-type Connection = private Connection of ConnectionModel
+[<NoComparison; NoEquality>]
+type Connection =
+    private
+    | Connection of ConnectionModel
 
-and private ConnectionModel = {
+    interface System.IDisposable with
+        member connection.Dispose() =
+            match connection with
+            | Connection model ->
+                model.logger.LogInformation (
+                    "Closing connection to node endpoint {connectionEndpoint}",
+                    string model.connection.Endpoint
+                )
+
+                model.connection.AbortAsync model.closeTimeout
+                |> Async.AwaitTask
+                |> Async.RunSynchronously
+
+and [<NoComparison; NoEquality>] private ConnectionModel = {
     logger: ILogger
     connection: IConnection
+    closeTimeout: System.TimeSpan
     onUnexpectedEvent: string -> string -> UnexpectedEvent -> Task<unit>
 }
 
@@ -18,7 +35,7 @@ and UnexpectedEvent =
     | UnexpectedChannelClosed of UnexpectedChannelClosedDetails
     | UnexpectedConsumerUnregistered of UnexpectedConsumerUnregistered
 
-and UnexpectedExceptionDetails = {
+and [<NoComparison; NoEquality>] UnexpectedExceptionDetails = {
     eventName: string
     detailFromRabbitMQClient: System.Collections.Generic.IDictionary<string, obj>
 }
@@ -35,6 +52,7 @@ type InitException internal (message: string, cause: exn) =
 
 module Connection =
 
+    [<NoComparison; NoEquality>]
     type Config = {
         /// Application-specific connection name, will be displayed in the management UI.
         name: string
@@ -64,6 +82,8 @@ module Connection =
         /// </list>
         /// </remarks>
         recoveryInterval: System.TimeSpan
+
+        closeTimeout: System.TimeSpan
 
         onUnexpectedEvent: UnexpectedEvent -> Async<unit>
     }
@@ -235,6 +255,7 @@ module Connection =
                     Connection {
                         logger = logger
                         connection = connection
+                        closeTimeout = config.closeTimeout
                         onUnexpectedEvent = onUnexpectedEventAsTask
                     }
 
@@ -256,24 +277,21 @@ module Connection =
         }
 
     /// Closes the connection.
-    let close (closeTimeout: System.TimeSpan) (Connection model) =
-        model.logger.LogInformation (
-            "Closing connection to node endpoint {connectionEndpoint}",
-            string model.connection.Endpoint
-        )
-
-        model.connection.AbortAsync closeTimeout |> Async.AwaitTask
+    let close (connection: Connection) =
+        (connection: System.IDisposable).Dispose ()
 
 module Consumer =
 
+    [<NoComparison; NoEquality>]
     type Client = private Client of ConsumerModel
 
-    and private ConsumerModel = {
+    and [<NoComparison; NoEquality>] private ConsumerModel = {
         consumer: AsyncEventingBasicConsumer
         consumedQueue: string
         logger: ILogger
     }
 
+    [<NoComparison; NoEquality>]
     type ReceivedMessage = private ReceivedMessage of ReceivedMessageData * ConsumerModel
 
     and private ReceivedMessageData = {
@@ -293,6 +311,7 @@ module Consumer =
         | Json of string
         | Binary of byte[]
 
+    [<NoComparison; NoEquality>]
     type QueueConfig = {
         queueName: string
         bindings: List<QueueBinding>
@@ -739,9 +758,10 @@ module RPC =
         thrownException: exn
     }
 
+    [<NoComparison; NoEquality>]
     type Client = private Client of RPCModel
 
-    and private RPCModel = {
+    and [<NoComparison; NoEquality>] private RPCModel = {
         clientName: string
         pendingRequests: PendingRequests
         consumer: AsyncEventingBasicConsumer
@@ -1082,9 +1102,10 @@ module Publish =
         thrownException: exn
     }
 
+    [<NoComparison; NoEquality>]
     type Client = private Client of PublishModel
 
-    and private PublishModel = {
+    and [<NoComparison; NoEquality>] private PublishModel = {
         clientName: string
         channel: IChannel
     }
