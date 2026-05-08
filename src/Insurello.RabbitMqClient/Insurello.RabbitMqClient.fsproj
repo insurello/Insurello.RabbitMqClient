@@ -1,61 +1,61 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-  
-    <PackageId>Insurello.RabbitMqClient</PackageId>
-    <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+    
+        <PackageId>Insurello.RabbitMqClient</PackageId>
+        <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
 
-    <Authors>Insurello</Authors>
-    <Company>Insurello</Company>
+        <Authors>Insurello</Authors>
+        <Company>Insurello</Company>
 
-    <RepositoryType>git</RepositoryType>
-    <RepositoryUrl>https://github.com/insurello/Insurello.RabbitMqClient</RepositoryUrl>
-  
-    <!-- Source Link configuration -->
-    <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <!-- FsAutoComplete doesn't support embedded sources so we rely on GitHub source links instead -->
-    <EmbedSources>false</EmbedSources>
+        <RepositoryType>git</RepositoryType>
+        <RepositoryUrl>https://github.com/insurello/Insurello.RabbitMqClient</RepositoryUrl>
+    
+        <!-- Source Link configuration -->
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
 
-    <!-- Embed symbols containing Source Link in the main file (exe/dll) -->
-    <DebugType>embedded</DebugType>
+        <EmbedSources>true</EmbedSources>
 
-    <GenerateDocumentationFile>true</GenerateDocumentationFile>
-  </PropertyGroup>
+        <!-- Embed symbols containing Source Link -->
+        <DebugType>embedded</DebugType>
 
-  <ItemGroup>
-    <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink. It's only used while building. -->
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.202" PrivateAssets="All" />
-  </ItemGroup>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    </PropertyGroup>
 
-  <PropertyGroup>
-    <!-- Enable opt-in warnings:
-    1182   = Unused variables
-    3389   = Implicit numeric widening
-    FS3560 = Copy and update changes all fields
-    -->
-    <WarnOn>1182,3389,FS3560</WarnOn>
+    <ItemGroup>
+        <!-- PrivateAssets="All" prevents consuming projects of this NuGet package from attempting to install SourceLink. It's only used while building. -->
+        <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.202" PrivateAssets="All" />
+    </ItemGroup>
 
-    <!-- Set enabled warnings as error during development:
-    FS0025 = Incomplete pattern matching
-    -->
-    <WarningsAsErrors>3389,FS0025</WarningsAsErrors>
-  </PropertyGroup>
+    <PropertyGroup>
+        <!-- Enable opt-in warnings:
+        1182   = Unused variables
+        3389   = Implicit numeric widening
+        FS3560 = Copy and update changes all fields
+        -->
+        <WarnOn>1182,3389,FS3560</WarnOn>
 
-  <!-- README file -->
-  <ItemGroup>
-    <None Include="../../README.md" Pack="true" PackagePath="." />
-  </ItemGroup>
-  
-  <!-- Source files -->
-  <ItemGroup>
-    <Compile Include="RabbitMqClient.fs" />
-  </ItemGroup>
+        <!-- Set enabled warnings as error during development:
+        FS0025 = Incomplete pattern matching
+        -->
+        <WarningsAsErrors>3389,FS0025</WarningsAsErrors>
+    </PropertyGroup>
 
-  <!-- Dependencies -->
-  <ItemGroup>
-    <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
-    <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.6" />
-  </ItemGroup>
+    <!-- README file -->
+    <ItemGroup>
+        <None Include="../../README.md" Pack="true" PackagePath="." />
+    </ItemGroup>
+    
+    <!-- Source files -->
+    <ItemGroup>
+        <Compile Include="RabbitMqClient.fs" />
+    </ItemGroup>
+
+    <!-- Dependencies -->
+    <ItemGroup>
+        <PackageReference Include="RabbitMq.Client" Version="7.2.1" />
+        <PackageReference Include="Microsoft.Extensions.Logging" Version="10.0.7" />
+    </ItemGroup>
 </Project>

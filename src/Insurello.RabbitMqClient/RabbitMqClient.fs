@@ -5,11 +5,27 @@ open RabbitMQ.Client
 open RabbitMQ.Client.Events
 open System.Threading.Tasks
 
-type Connection = private Connection of ConnectionModel
+type Connection =
+    private
+    | Connection of ConnectionModel
+
+    interface System.IDisposable with
+        member connection.Dispose() =
+            match connection with
+            | Connection model ->
+                model.logger.LogInformation (
+                    "Closing connection to node endpoint {connectionEndpoint}",
+                    string model.connection.Endpoint
+                )
+
+                model.connection.AbortAsync model.closeTimeout
+                |> Async.AwaitTask
+                |> Async.RunSynchronously
 
 and private ConnectionModel = {
     logger: ILogger
     connection: IConnection
+    closeTimeout: System.TimeSpan
     onUnexpectedEvent: string -> string -> UnexpectedEvent -> Task<unit>
 }
 
@@ -64,6 +80,8 @@ module Connection =
         /// </list>
         /// </remarks>
         recoveryInterval: System.TimeSpan
+
+        closeTimeout: System.TimeSpan
 
         onUnexpectedEvent: UnexpectedEvent -> Async<unit>
     }
@@ -235,6 +253,7 @@ module Connection =
                     Connection {
                         logger = logger
                         connection = connection
+                        closeTimeout = config.closeTimeout
                         onUnexpectedEvent = onUnexpectedEventAsTask
                     }
 
@@ -256,13 +275,8 @@ module Connection =
         }
 
     /// Closes the connection.
-    let close (closeTimeout: System.TimeSpan) (Connection model) =
-        model.logger.LogInformation (
-            "Closing connection to node endpoint {connectionEndpoint}",
-            string model.connection.Endpoint
-        )
-
-        model.connection.AbortAsync closeTimeout |> Async.AwaitTask
+    let close (connection: Connection) =
+        (connection: System.IDisposable).Dispose ()
 
 module Consumer =
 
