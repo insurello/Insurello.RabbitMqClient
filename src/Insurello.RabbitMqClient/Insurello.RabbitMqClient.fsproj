@@ -1,6 +1,6 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
     <PropertyGroup>
-        <TargetFramework>net8.0</TargetFramework>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
     
         <PackageId>Insurello.RabbitMqClient</PackageId>
         <PackageDescription>A specialized F# wrapper around RabbitMq.Client</PackageDescription>
