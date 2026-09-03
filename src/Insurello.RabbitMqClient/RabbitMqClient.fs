@@ -486,7 +486,13 @@ module Consumer =
 
                 consumer.add_UnregisteredAsync (fun _ eventArgs ->
                     task {
-                        if eventArgs.ConsumerTags |> Array.contains consumerTag then
+                        // On channel shutdown the RabbitMQ client reports the consumer's current tag set,
+                        // which can already be empty, assume empty was meant for this consumer.
+                        let isThisConsumer =
+                            Array.isEmpty eventArgs.ConsumerTags
+                            || Array.contains consumerTag eventArgs.ConsumerTags
+
+                        if isThisConsumer then
                             // If the consumer became unregistered without a channel shutdown
                             // it probably means the queue was deleted, which is unexpected.
                             let isUnexpected = not wasChannelShutdownBeforeUnregistered
