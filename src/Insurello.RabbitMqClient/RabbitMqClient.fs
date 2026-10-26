@@ -348,6 +348,14 @@ module Consumer =
         thrownException: exn
     }
 
+    /// The result of acking or nacking a message.
+    type AckOrNackOutcome =
+        /// The message was acked or nacked, or will be nacked after the delay.
+        | AckedOrNacked
+        /// The ack or nack was skipped because the connection is closed, e.g. during shutdown or while waiting to be recovered.
+        /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
+        | SkippedDueToConnectionClosed
+
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
     /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
     let init (config: QueueConfig) (Connection model: Connection) : Async<Client> =
@@ -557,61 +565,128 @@ module Consumer =
     let close (Client model: Client) : Async<unit> =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
-    let ack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
-        async {
-            try
-                do!
-                    model.consumer.Channel.BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false).AsTask ()
-                    |> Async.AwaitTask
+    let private logSkippedConnectionClosed
+        (operation: string)
+        (message: ReceivedMessageData)
+        (model: ConsumerModel)
+        : unit =
+        model.logger.LogWarning (
+            "Unable to {operation} message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
+            operation,
+            message.messageId,
+            model.consumedQueue
+        )
 
-            with :? Exceptions.AlreadyClosedException as exn ->
-                // `AlreadyClosedException` is thrown when the connection is closed.
-                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
-                model.logger.LogWarning (
-                    exn,
-                    "Unable to ack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
-                    message.messageId,
-                    model.consumedQueue
-                )
+    /// Acks the message. Skipped and logged as a warning when the connection is closed, see `AckOrNackOutcome.SkippedDueToConnectionClosed`.
+    let tryAck (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOrNackOutcome> =
+        async {
+            // `BasicAckAsync` doesn't always throw while the connection is closed, so check first.
+            if model.connection.IsOpen then
+                try
+                    do!
+                        model.consumer.Channel
+                            .BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false)
+                            .AsTask ()
+                        |> Async.AwaitTask
+
+                    return AckedOrNacked
+
+                with :? Exceptions.AlreadyClosedException ->
+                    // The connection closed after the check above.
+                    logSkippedConnectionClosed "ack" message model
+
+                    return SkippedDueToConnectionClosed
+
+            else
+                logSkippedConnectionClosed "ack" message model
+
+                return SkippedDueToConnectionClosed
         }
 
-    let nack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
-        async {
-            try
-                do!
-                    model.consumer.Channel
-                        .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
-                        .AsTask ()
-                    |> Async.AwaitTask
+    /// Deprecated. Use `tryAck` instead.
+    let ack (receivedMessage: ReceivedMessage) : Async<unit> = tryAck receivedMessage |> Async.Ignore
 
-            with :? Exceptions.AlreadyClosedException as exn ->
-                // `AlreadyClosedException` is thrown when the connection is closed.
-                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
-                model.logger.LogWarning (
-                    exn,
-                    "Unable to nack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
-                    message.messageId,
-                    model.consumedQueue
-                )
+    /// Nacks the message so it's requeued. Skipped and logged as a warning when the connection is closed, see `AckOrNackOutcome.SkippedDueToConnectionClosed`.
+    let tryNack (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOrNackOutcome> =
+        async {
+            // `BasicNackAsync` doesn't always throw while the connection is closed, so check first.
+            if model.connection.IsOpen then
+                try
+                    do!
+                        model.consumer.Channel
+                            .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
+                            .AsTask ()
+                        |> Async.AwaitTask
+
+                    return AckedOrNacked
+
+                with :? Exceptions.AlreadyClosedException ->
+                    // The connection closed after the check above.
+                    logSkippedConnectionClosed "nack" message model
+
+                    return SkippedDueToConnectionClosed
+
+            else
+                logSkippedConnectionClosed "nack" message model
+
+                return SkippedDueToConnectionClosed
         }
 
+    /// Deprecated. Use `tryNack` instead.
+    let nack (receivedMessage: ReceivedMessage) : Async<unit> = tryNack receivedMessage |> Async.Ignore
+
+    /// Deprecated. Use `tryNackWithDelayNonBlocking` instead.
+    ///
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
-    let private nackWithDelayBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
-        async {
-            do! Async.Sleep delay
+    /// Returns `SkippedDueToConnectionClosed` right away, without waiting, when the connection is already closed.
+    /// If the connection closes during the delay, the nack is skipped as well. Skipped nacks are logged as warnings.
+    let tryNackWithDelayBlocking (delay: System.TimeSpan) (receivedMessage: ReceivedMessage) : Async<AckOrNackOutcome> =
+        let (ReceivedMessage (message, model)) = receivedMessage
 
-            return! nack message
+        async {
+            if model.connection.IsOpen then
+                do! Async.Sleep delay
+
+                return! tryNack receivedMessage
+
+            else
+                logSkippedConnectionClosed "nack" message model
+
+                return SkippedDueToConnectionClosed
         }
 
     /// The consumed message will be nacked after a specified delay. Will return without waiting for the delay.
-    let nackWithDelayNonBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
-        async {
-            // `StartChild` means we share the same `cancellation token`,
-            // so any exceptions should be propagated back to this call.
-            let! _ = nackWithDelayBlocking delay message |> Async.StartChild
+    /// Returns `SkippedDueToConnectionClosed` without scheduling the nack when the connection is already closed.
+    /// If the connection closes during the delay, the nack is skipped as well. Skipped nacks are logged as warnings.
+    let tryNackWithDelayNonBlocking
+        (delay: System.TimeSpan)
+        (receivedMessage: ReceivedMessage)
+        : Async<AckOrNackOutcome> =
+        let (ReceivedMessage (message, model)) = receivedMessage
 
-            return ()
+        async {
+            if model.connection.IsOpen then
+                // `StartChild` means we share the same `cancellation token`,
+                // so any exceptions should be propagated back to this call.
+                let! _ =
+                    async {
+                        do! Async.Sleep delay
+
+                        return! tryNack receivedMessage
+                    }
+                    |> Async.StartChild
+
+                return AckedOrNacked
+
+            else
+                logSkippedConnectionClosed "nack" message model
+
+                return SkippedDueToConnectionClosed
         }
+
+    /// Deprecated. Use `tryNackWithDelayNonBlocking` instead.
+    let nackWithDelayNonBlocking (delay: System.TimeSpan) (receivedMessage: ReceivedMessage) : Async<unit> =
+        tryNackWithDelayNonBlocking delay receivedMessage |> Async.Ignore
 
     let messageId (ReceivedMessage (message, _): ReceivedMessage) : string = message.messageId
 

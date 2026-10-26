@@ -180,14 +180,18 @@ let ``Closing the connection while a message handler waits for an RPC reply does
     }
 
 [<Fact>]
-let ``isConnectionStillOpen is false while the connection is closed and true again after recovery`` () =
+let ``Nack is skipped while the connection is closed and nacks again after recovery`` () =
     let connectionName = Helpers.uniqueName "recovery"
     let queueName = Helpers.uniqueName "recovery"
 
     async {
         try
+            // Stay closed long enough for the handler to nack before the connection is recovered.
             use! connection =
-                Helpers.connectionConfig connectionName
+                {
+                    Helpers.connectionConfig connectionName with
+                        recoveryInterval = System.TimeSpan.FromSeconds 5.
+                }
                 |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
 
             let! publishClient = RabbitMqClient.Publish.init "TestPublishClient" connection
@@ -197,11 +201,16 @@ let ``isConnectionStillOpen is false while the connection is closed and true aga
             let firstDeliveryStarted =
                 TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
 
-            let firstDeliverySawClosed =
-                TaskCompletionSource<bool> TaskCreationOptions.RunContinuationsAsynchronously
+            let whileClosed =
+                TaskCompletionSource<bool * RabbitMqClient.Consumer.AckOrNackOutcome>
+                    TaskCreationOptions.RunContinuationsAsynchronously
 
-            let redeliverySawOpen =
-                TaskCompletionSource<bool> TaskCreationOptions.RunContinuationsAsynchronously
+            let afterRecovery =
+                TaskCompletionSource<bool * RabbitMqClient.Consumer.AckOrNackOutcome>
+                    TaskCreationOptions.RunContinuationsAsynchronously
+
+            let nackedMessageRedelivered =
+                TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
 
             let rec waitUntilClosed
                 (message: RabbitMqClient.Consumer.ReceivedMessage)
@@ -220,20 +229,27 @@ let ``isConnectionStillOpen is false while the connection is closed and true aga
                     (fun message ->
                         async {
                             // The redelivery can arrive while the first delivery's handler is still running, so count atomically.
-                            if System.Threading.Interlocked.Increment &deliveries.contents = 1 then
+                            let delivery = System.Threading.Interlocked.Increment &deliveries.contents
+
+                            if delivery = 1 then
                                 firstDeliveryStarted.TrySetResult () |> ignore
 
                                 // Don't ack, the broker requeues the message when it closes the connection.
                                 do! waitUntilClosed message 400
 
-                                firstDeliverySawClosed.TrySetResult (
-                                    not (RabbitMqClient.Consumer.isConnectionStillOpen message)
-                                )
-                                |> ignore
+                                let isOpen = RabbitMqClient.Consumer.isConnectionStillOpen message
+                                let! nackResult = RabbitMqClient.Consumer.tryNack message
+
+                                whileClosed.TrySetResult ((isOpen, nackResult)) |> ignore
+
+                            else if delivery = 2 then
+                                let isOpen = RabbitMqClient.Consumer.isConnectionStillOpen message
+                                let! nackResult = RabbitMqClient.Consumer.tryNack message
+
+                                afterRecovery.TrySetResult ((isOpen, nackResult)) |> ignore
 
                             else
-                                redeliverySawOpen.TrySetResult (RabbitMqClient.Consumer.isConnectionStillOpen message)
-                                |> ignore
+                                nackedMessageRedelivered.TrySetResult () |> ignore
 
                                 do! RabbitMqClient.Consumer.ack message
                         }
@@ -247,20 +263,26 @@ let ``isConnectionStillOpen is false while the connection is closed and true aga
 
             do! managementApiClient.forceCloseConnection connectionName
 
-            let! sawClosed =
-                firstDeliverySawClosed.Task.WaitAsync (System.TimeSpan.FromSeconds 25.)
-                |> Async.AwaitTask
+            let! isOpenWhileClosed, nackResultWhileClosed =
+                whileClosed.Task.WaitAsync (System.TimeSpan.FromSeconds 25.) |> Async.AwaitTask
 
-            Assert.True (sawClosed, "Expected isConnectionStillOpen to be false after the connection was closed")
-
-            let! sawOpen =
-                redeliverySawOpen.Task.WaitAsync (System.TimeSpan.FromSeconds 30.)
-                |> Async.AwaitTask
-
-            Assert.True (
-                sawOpen,
-                "Expected isConnectionStillOpen to be true for the message redelivered after recovery"
+            Assert.False (
+                isOpenWhileClosed,
+                "Expected isConnectionStillOpen to be false while the connection is closed"
             )
+
+            Assert.Equal (RabbitMqClient.Consumer.SkippedDueToConnectionClosed, nackResultWhileClosed)
+
+            let! isOpenAfterRecovery, nackResultAfterRecovery =
+                afterRecovery.Task.WaitAsync (System.TimeSpan.FromSeconds 30.)
+                |> Async.AwaitTask
+
+            Assert.True (isOpenAfterRecovery, "Expected isConnectionStillOpen to be true after recovery")
+            Assert.Equal (RabbitMqClient.Consumer.AckedOrNacked, nackResultAfterRecovery)
+
+            do!
+                nackedMessageRedelivered.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
+                |> Async.AwaitTask
         finally
             managementApiClient.deleteQueue queueName |> Async.RunSynchronously
     }
