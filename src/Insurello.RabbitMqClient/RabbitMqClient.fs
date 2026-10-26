@@ -278,11 +278,15 @@ module Connection =
     let close (connection: Connection) =
         (connection: System.IDisposable).Dispose ()
 
+    /// Returns if connection is open or closed, e.g. during shutdown or while waiting to be recovered.
+    let isOpen (Connection model: Connection) : bool = model.connection.IsOpen
+
 module Consumer =
 
     type Client = private Client of ConsumerModel
 
     and private ConsumerModel = {
+        connection: IConnection
         consumer: AsyncEventingBasicConsumer
         consumedQueue: string
         logger: ILogger
@@ -346,6 +350,28 @@ module Consumer =
         replyToQueue: string
         thrownException: exn
     }
+
+    [<RequireQualifiedAccess>]
+    type AckOutcome =
+        | Acked
+        /// The ack was skipped because the connection is closed, e.g. during shutdown or while waiting to be recovered.
+        /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
+        | SkippedDueToConnectionClosed
+
+    [<RequireQualifiedAccess>]
+    type NackOutcome =
+        | Nacked
+        /// The nack was skipped because the connection is closed, e.g. during shutdown or while waiting to be recovered.
+        /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
+        | SkippedDueToConnectionClosed
+
+    [<RequireQualifiedAccess>]
+    type DelayedNackOutcome =
+        /// The nack is scheduled. It's skipped and logged as a warning if the connection closes during the delay.
+        | NackScheduled
+        /// The nack was skipped because the connection is closed, e.g. during shutdown or while waiting to be recovered.
+        /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
+        | SkippedDueToConnectionClosed
 
     /// <summary>Initializes a Consumer client. Declares and optionally binds the specified queue to an exchange, then starts consuming messages.</summary>
     /// <exception cref="InitException">On any thrown exception during initialization. The inner exception holds the thrown exception.</exception>
@@ -434,6 +460,7 @@ module Consumer =
                     $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
                 let consumerModel = {
+                    connection = model.connection
                     consumer = consumer
                     consumedQueue = config.queueName
                     logger = model.logger
@@ -555,60 +582,169 @@ module Consumer =
     let close (Client model: Client) : Async<unit> =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
-    let ack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
-        async {
-            try
-                do!
-                    model.consumer.Channel.BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false).AsTask ()
-                    |> Async.AwaitTask
+    let inline private logSkippedDueToConnectionClosed
+        (operation: string)
+        (message: ReceivedMessageData)
+        (model: ConsumerModel)
+        : unit =
+        model.logger.LogWarning (
+            "Skipped the {operation} of message ({messageId}) from queue {consumedQueue} because the connection is closed. RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again",
+            operation,
+            message.messageId,
+            model.consumedQueue
+        )
 
-            with :? Exceptions.AlreadyClosedException as exn ->
-                // `AlreadyClosedException` is thrown when the connection is closed.
-                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
-                model.logger.LogWarning (
-                    exn,
-                    "Unable to ack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
-                    message.messageId,
-                    model.consumedQueue
-                )
+    /// Tries to ack the message. If the connection is closed the ack is skipped.
+    /// Doesn't log a skipped ack, the caller is expected to handle `AckOutcome.SkippedDueToConnectionClosed`.
+    let tryAck (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOutcome> =
+        async {
+            // `BasicAckAsync` doesn't always throw while the connection is closed, so check first.
+            // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
+            // when the connection closes and acks only apply on the connection the message was delivered on,
+            // so at worst the message is consumed one more time. That's RabbitMQ's at-least-once delivery, which applies
+            // whenever the connection closes before the ack reaches the broker, so consumers must be idempotent anyway.
+            if model.connection.IsOpen then
+                try
+                    do!
+                        model.consumer.Channel
+                            .BasicAckAsync(deliveryTag = message.deliveryTag, multiple = false)
+                            .AsTask ()
+                        |> Async.AwaitTask
+
+                    return AckOutcome.Acked
+
+                with :? Exceptions.AlreadyClosedException ->
+                    // The connection closed during acking.
+                    return AckOutcome.SkippedDueToConnectionClosed
+
+            else
+                return AckOutcome.SkippedDueToConnectionClosed
         }
 
-    let nack (ReceivedMessage (message, model): ReceivedMessage) : Async<unit> =
+    /// Deprecated. Use `tryAck` instead.
+    ///
+    /// Logs a skipped ack as a warning, since the caller doesn't get the outcome.
+    let ack (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage) : Async<unit> =
         async {
-            try
-                do!
-                    model.consumer.Channel
-                        .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
-                        .AsTask ()
-                    |> Async.AwaitTask
-
-            with :? Exceptions.AlreadyClosedException as exn ->
-                // `AlreadyClosedException` is thrown when the connection is closed.
-                // As we enforce connection recovery we can assume the connection is in recovery mode when this happens.
-                model.logger.LogWarning (
-                    exn,
-                    "Unable to nack message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be reconsumed once a new connection has been established",
-                    message.messageId,
-                    model.consumedQueue
-                )
+            match! tryAck receivedMessage with
+            | AckOutcome.Acked -> ()
+            | AckOutcome.SkippedDueToConnectionClosed -> logSkippedDueToConnectionClosed "ack" message model
         }
 
+    /// Tries to nack the message so it's requeued. If the connection is closed the nack is skipped.
+    /// Doesn't log a skipped nack, the caller is expected to handle `NackOutcome.SkippedDueToConnectionClosed`.
+    let tryNack (ReceivedMessage (message, model): ReceivedMessage) : Async<NackOutcome> =
+        async {
+            // `BasicNackAsync` doesn't always throw while the connection is closed, so check first.
+            // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
+            // when the connection closes and nacks only apply on the connection the message was delivered on,
+            // so the message is consumed again either way. That's RabbitMQ's at-least-once delivery, which applies
+            // whenever the connection closes before the nack reaches the broker, so consumers must be idempotent anyway.
+            if model.connection.IsOpen then
+                try
+                    do!
+                        model.consumer.Channel
+                            .BasicNackAsync(deliveryTag = message.deliveryTag, multiple = false, requeue = true)
+                            .AsTask ()
+                        |> Async.AwaitTask
+
+                    return NackOutcome.Nacked
+
+                with :? Exceptions.AlreadyClosedException ->
+                    // The connection closed during nacking.
+                    return NackOutcome.SkippedDueToConnectionClosed
+
+            else
+                return NackOutcome.SkippedDueToConnectionClosed
+        }
+
+    /// Deprecated. Use `tryNack` instead.
+    ///
+    /// Logs a skipped nack as a warning, since the caller doesn't get the outcome.
+    let nack (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage) : Async<unit> =
+        async {
+            match! tryNack receivedMessage with
+            | NackOutcome.Nacked -> ()
+            | NackOutcome.SkippedDueToConnectionClosed -> logSkippedDueToConnectionClosed "nack" message model
+        }
+
+    /// Deprecated. Use `tryNackWithDelayNonBlocking` instead.
+    ///
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
-    let private nackWithDelayBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
+    /// Returns right away, without waiting, when the connection is already closed.
+    /// If the connection closes during the delay, the nack is skipped as well.
+    /// Doesn't log a skipped nack, the caller is expected to handle `NackOutcome.SkippedDueToConnectionClosed`.
+    let tryNackWithDelayBlocking
+        (delay: System.TimeSpan)
+        (ReceivedMessage (_, model) as receivedMessage: ReceivedMessage)
+        : Async<NackOutcome> =
         async {
-            do! Async.Sleep delay
+            if model.connection.IsOpen then
+                do! Async.Sleep delay
 
-            return! nack message
+                return! tryNack receivedMessage
+
+            else
+                return NackOutcome.SkippedDueToConnectionClosed
         }
 
-    /// The consumed message will be nacked after a specified delay. Will return without waiting for the delay.
-    let nackWithDelayNonBlocking (delay: System.TimeSpan) (message: ReceivedMessage) : Async<unit> =
+    /// <summary>Schedules a nack of the message after <c>delay</c>, so it's requeued, and returns right away without waiting for the delay.</summary>
+    /// <remarks>
+    /// <list>
+    /// <item><description>Returns <c>DelayedNackOutcome.NackScheduled</c> when the nack was scheduled. The message stays unacked during the delay, so it keeps its prefetch slot.</description></item>
+    /// <item><description>Returns <c>DelayedNackOutcome.SkippedDueToConnectionClosed</c> without scheduling anything when the connection is already closed. RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again. This isn't logged, the caller is expected to handle it.</description></item>
+    /// <item><description>If the connection closes during the delay, the nack is skipped and logged as a warning, since the caller can't be told about it. RabbitMQ requeues the message in that case too.</description></item>
+    /// <item><description>The delayed nack runs detached from the caller, so cancelling the caller doesn't cancel it.</description></item>
+    /// <item><description>Any other failure of the delayed nack is logged as an error, since the caller can't be told about it.</description></item>
+    /// </list>
+    /// </remarks>
+    let tryNackWithDelayNonBlocking
+        (delay: System.TimeSpan)
+        (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage)
+        : Async<DelayedNackOutcome> =
         async {
-            // `StartChild` means we share the same `cancellation token`,
-            // so any exceptions should be propagated back to this call.
-            let! _ = nackWithDelayBlocking delay message |> Async.StartChild
+            if model.connection.IsOpen then
+                // Runs detached from the caller, so cancelling the caller doesn't leave the message unacked.
+                // Nothing awaits its result, so failures are logged here instead of crashing the process.
+                Async.Start (
+                    async {
+                        try
+                            do! Async.Sleep delay
 
-            return ()
+                            match! tryNack receivedMessage with
+                            | NackOutcome.Nacked -> ()
+                            | NackOutcome.SkippedDueToConnectionClosed ->
+                                logSkippedDueToConnectionClosed "delayed nack" message model
+                        with exn ->
+                            // A closed connection is handled by `tryNack`, so this is unexpected.
+                            model.logger.LogError (
+                                exn,
+                                "Unable to nack message ({messageId}) from queue {consumedQueue} after the delay",
+                                message.messageId,
+                                model.consumedQueue
+                            )
+                    },
+                    System.Threading.CancellationToken.None
+                )
+
+                return DelayedNackOutcome.NackScheduled
+
+            else
+                return DelayedNackOutcome.SkippedDueToConnectionClosed
+        }
+
+    /// Deprecated. Use `tryNackWithDelayNonBlocking` instead.
+    ///
+    /// Logs a nack skipped because the connection is already closed as a warning, since the caller doesn't get the outcome.
+    let nackWithDelayNonBlocking
+        (delay: System.TimeSpan)
+        (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage)
+        : Async<unit> =
+        async {
+            match! tryNackWithDelayNonBlocking delay receivedMessage with
+            | DelayedNackOutcome.NackScheduled -> ()
+            | DelayedNackOutcome.SkippedDueToConnectionClosed ->
+                logSkippedDueToConnectionClosed "delayed nack" message model
         }
 
     let messageId (ReceivedMessage (message, _): ReceivedMessage) : string = message.messageId
@@ -642,63 +778,81 @@ module Consumer =
                     )
 
             | replyTo, correlationId ->
-                try
-                    let messageId = System.Guid.NewGuid().ToString ()
+                // `BasicPublishAsync` doesn't always throw while the connection is closed, so check first.
+                if not model.connection.IsOpen then
+                    let replyCode, replyText =
+                        match model.connection.CloseReason with
+                        | null -> 0, "Connection closed"
+                        | closeReason -> int closeReason.ReplyCode, closeReason.ReplyText
 
-                    let contentType, body =
-                        match replyMessage.body with
-                        | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
-                        | Binary data -> "application/octet-stream", data
-
-                    let headers =
-                        // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
-                        ("sequence_end", "true") :: replyMessage.headers
-                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                        |> System.Collections.Generic.Dictionary
-
-                    do!
-                        model.consumer.Channel.BasicPublishAsync (
-                            exchange = "",
-                            routingKey = replyTo,
-                            // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
-                            mandatory = false,
-                            basicProperties =
-                                BasicProperties (
-                                    ContentType = contentType,
-                                    Persistent = true,
-                                    MessageId = messageId,
-                                    CorrelationId = correlationId,
-                                    Headers = headers
-                                ),
-                            body = body
-                        )
-
-                    return Ok ()
-
-                with
-                | :? Exceptions.AlreadyClosedException as exn ->
-                    // `AlreadyClosedException` is thrown when the connection is closed.
-                    // As we enforce connection recovery we can assume the connection is in
-                    // recovery mode when this happens.
                     return
                         Error (
                             ConnectionInRecoveryMode {
                                 consumedQueue = model.consumedQueue
                                 replyToQueue = replyTo
-                                replyCode = int exn.ShutdownReason.ReplyCode
-                                replyText = exn.ShutdownReason.ReplyText
+                                replyCode = replyCode
+                                replyText = replyText
                             }
                         )
 
-                | exn ->
-                    return
-                        Error (
-                            UnexpectedError {
-                                consumedQueue = model.consumedQueue
-                                replyToQueue = replyTo
-                                thrownException = exn
-                            }
-                        )
+                else
+                    try
+                        let messageId = System.Guid.NewGuid().ToString ()
+
+                        let contentType, body =
+                            match replyMessage.body with
+                            | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
+                            | Binary data -> "application/octet-stream", data
+
+                        let headers =
+                            // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
+                            ("sequence_end", "true") :: replyMessage.headers
+                            |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                            |> System.Collections.Generic.Dictionary
+
+                        do!
+                            model.consumer.Channel.BasicPublishAsync (
+                                exchange = "",
+                                routingKey = replyTo,
+                                // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
+                                mandatory = false,
+                                basicProperties =
+                                    BasicProperties (
+                                        ContentType = contentType,
+                                        Persistent = true,
+                                        MessageId = messageId,
+                                        CorrelationId = correlationId,
+                                        Headers = headers
+                                    ),
+                                body = body
+                            )
+
+                        return Ok ()
+
+                    with
+                    | :? Exceptions.AlreadyClosedException as exn ->
+                        // `AlreadyClosedException` is thrown when the connection is closed.
+                        // As we enforce connection recovery we can assume the connection is in
+                        // recovery mode when this happens.
+                        return
+                            Error (
+                                ConnectionInRecoveryMode {
+                                    consumedQueue = model.consumedQueue
+                                    replyToQueue = replyTo
+                                    replyCode = int exn.ShutdownReason.ReplyCode
+                                    replyText = exn.ShutdownReason.ReplyText
+                                }
+                            )
+
+                    | exn ->
+                        return
+                            Error (
+                                UnexpectedError {
+                                    consumedQueue = model.consumedQueue
+                                    replyToQueue = replyTo
+                                    thrownException = exn
+                                }
+                            )
         }
         |> Async.AwaitTask
 
@@ -767,10 +921,14 @@ module RPC =
         consumer: AsyncEventingBasicConsumer
     }
 
-    and private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Option<IReadOnlyBasicProperties * byte[]>>>
+    and private PendingRequests = ConcurrentDictionary<CorrelationId, TaskCompletionSource<PendingRequestResult>>
 
     and private CorrelationId = string
+
+    and private PendingRequestResult =
+        | Replied of IReadOnlyBasicProperties * byte[]
+        | TimedOut
+        | ChannelShutdown of replyCode: int * replyText: string
 
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
@@ -819,6 +977,14 @@ module RPC =
 
                         let replyCode = int eventArgs.ReplyCode
 
+                        // Replies are sent to direct reply-to on this channel and will never be received once it's closed.
+                        // Fail all pending requests now instead of letting them wait until they time out.
+                        for correlationId in pendingRequests.Keys do
+                            match pendingRequests.TryRemove correlationId with
+                            | true, tcs ->
+                                tcs.TrySetResult (ChannelShutdown (replyCode, eventArgs.ReplyText)) |> ignore
+                            | _ -> ()
+
                         // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
                         // ReplySuccess is (usually) passed when the connection is closed from current running program.
                         // ConnectionForced is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
@@ -842,7 +1008,7 @@ module RPC =
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
                             // Ensure the message body is copied before setting the response.
-                            let response = Some (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
+                            let response = Replied (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
 
                             if not (tcs.TrySetResult response) then
                                 model.logger.LogWarning (
@@ -952,7 +1118,7 @@ module RPC =
                                 model.pendingRequests.TryRemove messageId |> ignore
 
                                 // Try set timed out response.
-                                requestCompletionSource.TrySetResult None |> ignore
+                                requestCompletionSource.TrySetResult TimedOut |> ignore
                         , useSynchronizationContext = false
                     )
 
@@ -984,9 +1150,11 @@ module RPC =
                                 body = requestBody
                             )
 
-                        // Wait until response received, or timed out (None).
+                        // Wait until response received, timed out or the channel was shut down.
                         match! requestCompletionSource.Task with
-                        | None ->
+                        | Replied (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+
+                        | TimedOut ->
                             return
                                 Error (
                                     RequestTimedOut {
@@ -996,7 +1164,15 @@ module RPC =
                                     }
                                 )
 
-                        | Some (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+                        | ChannelShutdown (replyCode, replyText) ->
+                            return
+                                Error (
+                                    ConnectionInRecoveryMode {
+                                        clientName = model.clientName
+                                        replyCode = replyCode
+                                        replyText = replyText
+                                    }
+                                )
 
                     else
                         return
