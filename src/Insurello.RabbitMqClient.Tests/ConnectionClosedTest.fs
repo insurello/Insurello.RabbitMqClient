@@ -202,11 +202,11 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
                 TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
 
             let whileClosed =
-                TaskCompletionSource<bool * RabbitMqClient.Consumer.AckOrNackOutcome>
+                TaskCompletionSource<bool * RabbitMqClient.Consumer.NackOutcome>
                     TaskCreationOptions.RunContinuationsAsynchronously
 
             let afterRecovery =
-                TaskCompletionSource<bool * RabbitMqClient.Consumer.AckOrNackOutcome>
+                TaskCompletionSource<bool * RabbitMqClient.Consumer.NackOutcome>
                     TaskCreationOptions.RunContinuationsAsynchronously
 
             let nackedMessageRedelivered =
@@ -271,14 +271,14 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
                 "Expected isConnectionStillOpen to be false while the connection is closed"
             )
 
-            Assert.Equal (RabbitMqClient.Consumer.SkippedDueToConnectionClosed, nackResultWhileClosed)
+            Assert.Equal (RabbitMqClient.Consumer.NackOutcome.SkippedDueToConnectionClosed, nackResultWhileClosed)
 
             let! isOpenAfterRecovery, nackResultAfterRecovery =
                 afterRecovery.Task.WaitAsync (System.TimeSpan.FromSeconds 30.)
                 |> Async.AwaitTask
 
             Assert.True (isOpenAfterRecovery, "Expected isConnectionStillOpen to be true after recovery")
-            Assert.Equal (RabbitMqClient.Consumer.AckedOrNacked, nackResultAfterRecovery)
+            Assert.Equal (RabbitMqClient.Consumer.NackOutcome.Nacked, nackResultAfterRecovery)
 
             do!
                 nackedMessageRedelivered.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
