@@ -26,6 +26,7 @@
     <!-- Test helpers -->
     <ItemGroup>
         <Compile Include="ManagementApiClient.fs" />
+        <Compile Include="CapturingLogger.fs" />
         <Compile Include="Helpers.fs" />
     </ItemGroup>
 

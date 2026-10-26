@@ -348,7 +348,6 @@ module Consumer =
         thrownException: exn
     }
 
-    /// The result of `tryAck`.
     [<RequireQualifiedAccess>]
     type AckOutcome =
         | Acked
@@ -356,7 +355,6 @@ module Consumer =
         /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
         | SkippedDueToConnectionClosed
 
-    /// The result of `tryNack` and `tryNackWithDelayBlocking`.
     [<RequireQualifiedAccess>]
     type NackOutcome =
         | Nacked
@@ -364,7 +362,6 @@ module Consumer =
         /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
         | SkippedDueToConnectionClosed
 
-    /// The result of `tryNackWithDelayNonBlocking`.
     [<RequireQualifiedAccess>]
     type DelayedNackOutcome =
         /// The nack is scheduled. It's skipped and logged as a warning if the connection closes during the delay.
@@ -582,7 +579,7 @@ module Consumer =
     let close (Client model: Client) : Async<unit> =
         model.consumer.Channel.CloseAsync () |> Async.AwaitTask
 
-    let private logSkippedConnectionClosed
+    let inline private logSkippedDueToConnectionClosed
         (operation: string)
         (message: ReceivedMessageData)
         (model: ConsumerModel)
@@ -594,13 +591,14 @@ module Consumer =
             model.consumedQueue
         )
 
-    /// Acks the message. Skipped and logged as a warning when the connection is closed, see `AckOutcome.SkippedDueToConnectionClosed`.
+    /// Tries to ack the message. If the connection is closed the ack is skipped and logged as a warning.
     let tryAck (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOutcome> =
         async {
             // `BasicAckAsync` doesn't always throw while the connection is closed, so check first.
             // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
             // when the connection closes and acks only apply on the connection the message was delivered on,
-            // so at worst the message is consumed one more time.
+            // so at worst the message is consumed one more time. That's RabbitMQ's at-least-once delivery, which applies
+            // whenever the connection closes before the ack reaches the broker, so consumers must be idempotent anyway.
             if model.connection.IsOpen then
                 try
                     do!
@@ -612,13 +610,13 @@ module Consumer =
                     return AckOutcome.Acked
 
                 with :? Exceptions.AlreadyClosedException ->
-                    // The connection closed after the check above.
-                    logSkippedConnectionClosed "ack" message model
+                    // The connection closed during acking.
+                    logSkippedDueToConnectionClosed "ack" message model
 
                     return AckOutcome.SkippedDueToConnectionClosed
 
             else
-                logSkippedConnectionClosed "ack" message model
+                logSkippedDueToConnectionClosed "ack" message model
 
                 return AckOutcome.SkippedDueToConnectionClosed
         }
@@ -626,13 +624,14 @@ module Consumer =
     /// Deprecated. Use `tryAck` instead.
     let ack (receivedMessage: ReceivedMessage) : Async<unit> = tryAck receivedMessage |> Async.Ignore
 
-    /// Nacks the message so it's requeued. Skipped and logged as a warning when the connection is closed, see `NackOutcome.SkippedDueToConnectionClosed`.
+    /// Tries to nack the message so it's requeued. If the connection is closed the nack is skipped and logged as a warning.
     let tryNack (ReceivedMessage (message, model): ReceivedMessage) : Async<NackOutcome> =
         async {
             // `BasicNackAsync` doesn't always throw while the connection is closed, so check first.
             // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
             // when the connection closes and nacks only apply on the connection the message was delivered on,
-            // so the message is consumed again either way.
+            // so the message is consumed again either way. That's RabbitMQ's at-least-once delivery, which applies
+            // whenever the connection closes before the nack reaches the broker, so consumers must be idempotent anyway.
             if model.connection.IsOpen then
                 try
                     do!
@@ -644,13 +643,13 @@ module Consumer =
                     return NackOutcome.Nacked
 
                 with :? Exceptions.AlreadyClosedException ->
-                    // The connection closed after the check above.
-                    logSkippedConnectionClosed "nack" message model
+                    // The connection closed during nacking.
+                    logSkippedDueToConnectionClosed "nack" message model
 
                     return NackOutcome.SkippedDueToConnectionClosed
 
             else
-                logSkippedConnectionClosed "nack" message model
+                logSkippedDueToConnectionClosed "nack" message model
 
                 return NackOutcome.SkippedDueToConnectionClosed
         }
@@ -661,11 +660,12 @@ module Consumer =
     /// Deprecated. Use `tryNackWithDelayNonBlocking` instead.
     ///
     /// The consumed message will be nacked after a specified delay. Will return after waiting for the delay.
-    /// Returns `NackOutcome.SkippedDueToConnectionClosed` right away, without waiting, when the connection is already closed.
+    /// Returns right away, without waiting, when the connection is already closed.
     /// If the connection closes during the delay, the nack is skipped as well. Skipped nacks are logged as warnings.
-    let tryNackWithDelayBlocking (delay: System.TimeSpan) (receivedMessage: ReceivedMessage) : Async<NackOutcome> =
-        let (ReceivedMessage (message, model)) = receivedMessage
-
+    let tryNackWithDelayBlocking
+        (delay: System.TimeSpan)
+        (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage)
+        : Async<NackOutcome> =
         async {
             if model.connection.IsOpen then
                 do! Async.Sleep delay
@@ -673,36 +673,53 @@ module Consumer =
                 return! tryNack receivedMessage
 
             else
-                logSkippedConnectionClosed "nack" message model
+                logSkippedDueToConnectionClosed "nack" message model
 
                 return NackOutcome.SkippedDueToConnectionClosed
         }
 
-    /// The consumed message will be nacked after a specified delay. Will return without waiting for the delay.
-    /// Returns `DelayedNackOutcome.SkippedDueToConnectionClosed` without scheduling the nack when the connection is already closed.
-    /// If the connection closes during the delay, the nack is skipped as well. Skipped nacks are logged as warnings.
+    /// <summary>Schedules a nack of the message after <c>delay</c>, so it's requeued, and returns right away without waiting for the delay.</summary>
+    /// <remarks>
+    /// <list>
+    /// <item><description>Returns <c>DelayedNackOutcome.NackScheduled</c> when the nack was scheduled. The message stays unacked during the delay, so it keeps its prefetch slot.</description></item>
+    /// <item><description>Returns <c>DelayedNackOutcome.SkippedDueToConnectionClosed</c> without scheduling anything when the connection is already closed, and logs it as a warning. RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.</description></item>
+    /// <item><description>If the connection closes during the delay, the nack is skipped and logged as a warning. RabbitMQ requeues the message in that case too.</description></item>
+    /// <item><description>The delayed nack runs detached from the caller, so cancelling the caller doesn't cancel it.</description></item>
+    /// <item><description>Any other failure of the delayed nack is logged as an error, since the caller can't be told about it.</description></item>
+    /// </list>
+    /// </remarks>
     let tryNackWithDelayNonBlocking
         (delay: System.TimeSpan)
-        (receivedMessage: ReceivedMessage)
+        (ReceivedMessage (message, model) as receivedMessage: ReceivedMessage)
         : Async<DelayedNackOutcome> =
-        let (ReceivedMessage (message, model)) = receivedMessage
-
         async {
             if model.connection.IsOpen then
-                // `StartChild` means we share the same `cancellation token`,
-                // so any exceptions should be propagated back to this call.
-                let! _ =
+                // Runs detached from the caller, so cancelling the caller doesn't leave the message unacked.
+                // Nothing awaits its result, so failures are logged here instead of crashing the process.
+                Async.Start (
                     async {
-                        do! Async.Sleep delay
+                        try
+                            do! Async.Sleep delay
 
-                        return! tryNack receivedMessage
-                    }
-                    |> Async.StartChild
+                            let! _ = tryNack receivedMessage
+
+                            return ()
+                        with exn ->
+                            // A closed connection is handled by `tryNack`, so this is unexpected.
+                            model.logger.LogError (
+                                exn,
+                                "Unable to nack message ({messageId}) from queue {consumedQueue} after the delay",
+                                message.messageId,
+                                model.consumedQueue
+                            )
+                    },
+                    System.Threading.CancellationToken.None
+                )
 
                 return DelayedNackOutcome.NackScheduled
 
             else
-                logSkippedConnectionClosed "nack" message model
+                logSkippedDueToConnectionClosed "nack" message model
 
                 return DelayedNackOutcome.SkippedDueToConnectionClosed
         }

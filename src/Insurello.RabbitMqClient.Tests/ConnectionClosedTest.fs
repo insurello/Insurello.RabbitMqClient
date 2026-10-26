@@ -286,3 +286,125 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
         finally
             managementApiClient.deleteQueue queueName |> Async.RunSynchronously
     }
+
+[<Fact>]
+let ``Cancelling the caller doesn't cancel a delayed nack`` () =
+    let connectionName = Helpers.uniqueName "delayed-nack-cancelled"
+    let queueName = Helpers.uniqueName "delayed-nack-cancelled"
+
+    async {
+        try
+            use! connection =
+                Helpers.connectionConfig connectionName
+                |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+
+            let! publishClient = RabbitMqClient.Publish.init "TestPublishClient" connection
+
+            let deliveries = ref 0
+
+            let delayedNackOutcome =
+                TaskCompletionSource<RabbitMqClient.Consumer.DelayedNackOutcome>
+                    TaskCreationOptions.RunContinuationsAsynchronously
+
+            let nackedMessageRedelivered =
+                TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
+
+            do!
+                connection
+                |> consume
+                    queueName
+                    (fun message ->
+                        async {
+                            if System.Threading.Interlocked.Increment &deliveries.contents = 1 then
+                                use cancellationTokenSource = new System.Threading.CancellationTokenSource ()
+
+                                let! outcome =
+                                    Async.StartAsTask (
+                                        RabbitMqClient.Consumer.tryNackWithDelayNonBlocking
+                                            (System.TimeSpan.FromSeconds 2.)
+                                            message,
+                                        cancellationToken = cancellationTokenSource.Token
+                                    )
+                                    |> Async.AwaitTask
+
+                                cancellationTokenSource.Cancel ()
+
+                                delayedNackOutcome.TrySetResult outcome |> ignore
+
+                            else
+                                nackedMessageRedelivered.TrySetResult () |> ignore
+
+                                do! RabbitMqClient.Consumer.ack message
+                        }
+                    )
+
+            do! publish publishClient queueName
+
+            let! outcome =
+                delayedNackOutcome.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
+                |> Async.AwaitTask
+
+            Assert.Equal (RabbitMqClient.Consumer.DelayedNackOutcome.NackScheduled, outcome)
+
+            // Only redelivered if the nack still happened after the caller was cancelled.
+            do!
+                nackedMessageRedelivered.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
+                |> Async.AwaitTask
+        finally
+            managementApiClient.deleteQueue queueName |> Async.RunSynchronously
+    }
+
+[<Fact>]
+let ``A delayed nack logs a warning when the connection closes during the delay`` () =
+    let connectionName = Helpers.uniqueName "delayed-nack-closed"
+    let queueName = Helpers.uniqueName "delayed-nack-closed"
+
+    async {
+        try
+            let logger = CapturingLogger.CapturingLogger ()
+
+            // Stay closed until after the delayed nack, which runs 2 seconds after the message is received.
+            use! connection =
+                {
+                    Helpers.connectionConfig connectionName with
+                        recoveryInterval = System.TimeSpan.FromSeconds 5.
+                }
+                |> RabbitMqClient.Connection.init logger
+
+            let! publishClient = RabbitMqClient.Publish.init "TestPublishClient" connection
+
+            let delayedNackOutcome =
+                TaskCompletionSource<RabbitMqClient.Consumer.DelayedNackOutcome>
+                    TaskCreationOptions.RunContinuationsAsynchronously
+
+            do!
+                connection
+                |> consume
+                    queueName
+                    (fun message ->
+                        async {
+                            let! outcome =
+                                RabbitMqClient.Consumer.tryNackWithDelayNonBlocking
+                                    (System.TimeSpan.FromSeconds 2.)
+                                    message
+
+                            delayedNackOutcome.TrySetResult outcome |> ignore
+                        }
+                    )
+
+            do! publish publishClient queueName
+
+            let! outcome =
+                delayedNackOutcome.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
+                |> Async.AwaitTask
+
+            Assert.Equal (RabbitMqClient.Consumer.DelayedNackOutcome.NackScheduled, outcome)
+
+            do! managementApiClient.forceCloseConnection connectionName
+
+            do! logger |> CapturingLogger.waitForWarning "Unable to nack message"
+
+            do! logger |> CapturingLogger.waitForWarning "because the connection is closed"
+        finally
+            managementApiClient.deleteQueue queueName |> Async.RunSynchronously
+    }
