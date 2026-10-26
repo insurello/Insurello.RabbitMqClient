@@ -278,6 +278,9 @@ module Connection =
     let close (connection: Connection) =
         (connection: System.IDisposable).Dispose ()
 
+    /// Returns if connection is open or closed, e.g. during shutdown or while waiting to be recovered.
+    let isOpen (Connection model: Connection) : bool = model.connection.IsOpen
+
 module Consumer =
 
     type Client = private Client of ConsumerModel
@@ -732,10 +735,6 @@ module Consumer =
 
     let messageBody (ReceivedMessage (message, _): ReceivedMessage) : string = message.body
 
-    /// Returns false while the connection the message was received on is closed, e.g. during shutdown or while waiting to be recovered.
-    /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
-    let isConnectionStillOpen (ReceivedMessage (_, model): ReceivedMessage) : bool = model.connection.IsOpen
-
     let messageRoutingKey (ReceivedMessage (message, _): ReceivedMessage) : string = message.routingKey
 
     let reply
@@ -763,63 +762,81 @@ module Consumer =
                     )
 
             | replyTo, correlationId ->
-                try
-                    let messageId = System.Guid.NewGuid().ToString ()
+                // `BasicPublishAsync` doesn't always throw while the connection is closed, so check first.
+                if not model.connection.IsOpen then
+                    let replyCode, replyText =
+                        match model.connection.CloseReason with
+                        | null -> 0, "Connection closed"
+                        | closeReason -> int closeReason.ReplyCode, closeReason.ReplyText
 
-                    let contentType, body =
-                        match replyMessage.body with
-                        | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
-                        | Binary data -> "application/octet-stream", data
-
-                    let headers =
-                        // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
-                        ("sequence_end", "true") :: replyMessage.headers
-                        |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
-                        |> System.Collections.Generic.Dictionary
-
-                    do!
-                        model.consumer.Channel.BasicPublishAsync (
-                            exchange = "",
-                            routingKey = replyTo,
-                            // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
-                            mandatory = false,
-                            basicProperties =
-                                BasicProperties (
-                                    ContentType = contentType,
-                                    Persistent = true,
-                                    MessageId = messageId,
-                                    CorrelationId = correlationId,
-                                    Headers = headers
-                                ),
-                            body = body
-                        )
-
-                    return Ok ()
-
-                with
-                | :? Exceptions.AlreadyClosedException as exn ->
-                    // `AlreadyClosedException` is thrown when the connection is closed.
-                    // As we enforce connection recovery we can assume the connection is in
-                    // recovery mode when this happens.
                     return
                         Error (
                             ConnectionInRecoveryMode {
                                 consumedQueue = model.consumedQueue
                                 replyToQueue = replyTo
-                                replyCode = int exn.ShutdownReason.ReplyCode
-                                replyText = exn.ShutdownReason.ReplyText
+                                replyCode = replyCode
+                                replyText = replyText
                             }
                         )
 
-                | exn ->
-                    return
-                        Error (
-                            UnexpectedError {
-                                consumedQueue = model.consumedQueue
-                                replyToQueue = replyTo
-                                thrownException = exn
-                            }
-                        )
+                else
+                    try
+                        let messageId = System.Guid.NewGuid().ToString ()
+
+                        let contentType, body =
+                            match replyMessage.body with
+                            | Json jsonContent -> "application/json", System.Text.Encoding.UTF8.GetBytes jsonContent
+                            | Binary data -> "application/octet-stream", data
+
+                        let headers =
+                            // `sequence_end` is required by rabbot (foo-foo-mq) clients (https://github.com/arobson/rabbot/issues/76).
+                            ("sequence_end", "true") :: replyMessage.headers
+                            |> Seq.map System.Collections.Generic.KeyValuePair<string, obj>
+                            |> System.Collections.Generic.Dictionary
+
+                        do!
+                            model.consumer.Channel.BasicPublishAsync (
+                                exchange = "",
+                                routingKey = replyTo,
+                                // `mandatory` should be false when publishing to a direct-reply-to queue (https://www.rabbitmq.com/direct-reply-to.html#limitations).
+                                mandatory = false,
+                                basicProperties =
+                                    BasicProperties (
+                                        ContentType = contentType,
+                                        Persistent = true,
+                                        MessageId = messageId,
+                                        CorrelationId = correlationId,
+                                        Headers = headers
+                                    ),
+                                body = body
+                            )
+
+                        return Ok ()
+
+                    with
+                    | :? Exceptions.AlreadyClosedException as exn ->
+                        // `AlreadyClosedException` is thrown when the connection is closed.
+                        // As we enforce connection recovery we can assume the connection is in
+                        // recovery mode when this happens.
+                        return
+                            Error (
+                                ConnectionInRecoveryMode {
+                                    consumedQueue = model.consumedQueue
+                                    replyToQueue = replyTo
+                                    replyCode = int exn.ShutdownReason.ReplyCode
+                                    replyText = exn.ShutdownReason.ReplyText
+                                }
+                            )
+
+                    | exn ->
+                        return
+                            Error (
+                                UnexpectedError {
+                                    consumedQueue = model.consumedQueue
+                                    replyToQueue = replyTo
+                                    thrownException = exn
+                                }
+                            )
         }
         |> Async.AwaitTask
 

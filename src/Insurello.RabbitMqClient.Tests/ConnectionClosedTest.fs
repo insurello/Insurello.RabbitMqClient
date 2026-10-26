@@ -212,14 +212,11 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
             let nackedMessageRedelivered =
                 TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
 
-            let rec waitUntilClosed
-                (message: RabbitMqClient.Consumer.ReceivedMessage)
-                (attemptsLeft: int)
-                : Async<unit> =
+            let rec waitUntilClosed (attemptsLeft: int) : Async<unit> =
                 async {
-                    if RabbitMqClient.Consumer.isConnectionStillOpen message && attemptsLeft > 0 then
+                    if RabbitMqClient.Connection.isOpen connection && attemptsLeft > 0 then
                         do! Async.Sleep 50
-                        return! waitUntilClosed message (attemptsLeft - 1)
+                        return! waitUntilClosed (attemptsLeft - 1)
                 }
 
             do!
@@ -235,15 +232,15 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
                                 firstDeliveryStarted.TrySetResult () |> ignore
 
                                 // Don't ack, the broker requeues the message when it closes the connection.
-                                do! waitUntilClosed message 400
+                                do! waitUntilClosed 400
 
-                                let isOpen = RabbitMqClient.Consumer.isConnectionStillOpen message
+                                let isOpen = RabbitMqClient.Connection.isOpen connection
                                 let! nackResult = RabbitMqClient.Consumer.tryNack message
 
                                 whileClosed.TrySetResult ((isOpen, nackResult)) |> ignore
 
                             else if delivery = 2 then
-                                let isOpen = RabbitMqClient.Consumer.isConnectionStillOpen message
+                                let isOpen = RabbitMqClient.Connection.isOpen connection
                                 let! nackResult = RabbitMqClient.Consumer.tryNack message
 
                                 afterRecovery.TrySetResult ((isOpen, nackResult)) |> ignore
@@ -266,10 +263,7 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
             let! isOpenWhileClosed, nackResultWhileClosed =
                 whileClosed.Task.WaitAsync (System.TimeSpan.FromSeconds 25.) |> Async.AwaitTask
 
-            Assert.False (
-                isOpenWhileClosed,
-                "Expected isConnectionStillOpen to be false while the connection is closed"
-            )
+            Assert.False (isOpenWhileClosed, "Expected the connection to be closed")
 
             Assert.Equal (RabbitMqClient.Consumer.NackOutcome.SkippedDueToConnectionClosed, nackResultWhileClosed)
 
@@ -277,7 +271,7 @@ let ``Nack is skipped while the connection is closed and nacks again after recov
                 afterRecovery.Task.WaitAsync (System.TimeSpan.FromSeconds 30.)
                 |> Async.AwaitTask
 
-            Assert.True (isOpenAfterRecovery, "Expected isConnectionStillOpen to be true after recovery")
+            Assert.True (isOpenAfterRecovery, "Expected the connection to be open again after recovery")
             Assert.Equal (RabbitMqClient.Consumer.NackOutcome.Nacked, nackResultAfterRecovery)
 
             do!
