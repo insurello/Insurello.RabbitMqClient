@@ -7,6 +7,8 @@ Project("{2150E333-8FDC-42A3-9474-1A3956D46DE8}") = "src", "src", "{AFC7EECF-08C
 EndProject
 Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Insurello.RabbitMqClient", "src\Insurello.RabbitMqClient\Insurello.RabbitMqClient.fsproj", "{43707A59-B2D2-4E24-A419-EE4F90AAF0CA}"
 EndProject
+Project("{F2A71F9B-5D33-465A-A702-920D77279786}") = "Insurello.RabbitMqClient.Tests", "src\Insurello.RabbitMqClient.Tests\Insurello.RabbitMqClient.Tests.fsproj", "{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -15,9 +17,6 @@ Global
 		Release|Any CPU = Release|Any CPU
 		Release|x64 = Release|x64
 		Release|x86 = Release|x86
-	EndGlobalSection
-	GlobalSection(SolutionProperties) = preSolution
-		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
 		{43707A59-B2D2-4E24-A419-EE4F90AAF0CA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
@@ -32,8 +31,24 @@ Global
 		{43707A59-B2D2-4E24-A419-EE4F90AAF0CA}.Release|x64.Build.0 = Release|Any CPU
 		{43707A59-B2D2-4E24-A419-EE4F90AAF0CA}.Release|x86.ActiveCfg = Release|Any CPU
 		{43707A59-B2D2-4E24-A419-EE4F90AAF0CA}.Release|x86.Build.0 = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|x64.ActiveCfg = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|x64.Build.0 = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|x86.ActiveCfg = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Debug|x86.Build.0 = Debug|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|Any CPU.Build.0 = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|x64.ActiveCfg = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|x64.Build.0 = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|x86.ActiveCfg = Release|Any CPU
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E}.Release|x86.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
 	EndGlobalSection
 	GlobalSection(NestedProjects) = preSolution
 		{43707A59-B2D2-4E24-A419-EE4F90AAF0CA} = {AFC7EECF-08C6-4611-A873-3D6B47292E42}
+		{8EC708A6-8CAD-4A70-AFF4-BEF6AABCB50E} = {AFC7EECF-08C6-4611-A873-3D6B47292E42}
 	EndGlobalSection
 EndGlobal

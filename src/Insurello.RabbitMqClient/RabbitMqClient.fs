@@ -283,6 +283,7 @@ module Consumer =
     type Client = private Client of ConsumerModel
 
     and private ConsumerModel = {
+        connection: IConnection
         consumer: AsyncEventingBasicConsumer
         consumedQueue: string
         logger: ILogger
@@ -434,6 +435,7 @@ module Consumer =
                     $"%s{config.queueName}-consumer-%s{System.Guid.NewGuid().ToString ()}"
 
                 let consumerModel = {
+                    connection = model.connection
                     consumer = consumer
                     consumedQueue = config.queueName
                     logger = model.logger
@@ -615,6 +617,10 @@ module Consumer =
 
     let messageBody (ReceivedMessage (message, _): ReceivedMessage) : string = message.body
 
+    /// Returns false while the connection the message was received on is closed, e.g. during shutdown or while waiting to be recovered.
+    /// RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again.
+    let isConnectionStillOpen (ReceivedMessage (_, model): ReceivedMessage) : bool = model.connection.IsOpen
+
     let messageRoutingKey (ReceivedMessage (message, _): ReceivedMessage) : string = message.routingKey
 
     let reply
@@ -767,10 +773,14 @@ module RPC =
         consumer: AsyncEventingBasicConsumer
     }
 
-    and private PendingRequests =
-        ConcurrentDictionary<CorrelationId, TaskCompletionSource<Option<IReadOnlyBasicProperties * byte[]>>>
+    and private PendingRequests = ConcurrentDictionary<CorrelationId, TaskCompletionSource<PendingRequestResult>>
 
     and private CorrelationId = string
+
+    and private PendingRequestResult =
+        | Replied of IReadOnlyBasicProperties * byte[]
+        | TimedOut
+        | ChannelShutdown of replyCode: int * replyText: string
 
     [<Literal>]
     let private queueDirectReplyTo = "amq.rabbitmq.reply-to"
@@ -819,6 +829,14 @@ module RPC =
 
                         let replyCode = int eventArgs.ReplyCode
 
+                        // Replies are sent to direct reply-to on this channel and will never be received once it's closed.
+                        // Fail all pending requests now instead of letting them wait until they time out.
+                        for correlationId in pendingRequests.Keys do
+                            match pendingRequests.TryRemove correlationId with
+                            | true, tcs ->
+                                tcs.TrySetResult (ChannelShutdown (replyCode, eventArgs.ReplyText)) |> ignore
+                            | _ -> ()
+
                         // Assume channel shutdown is expected on ReplySuccess (200) or ConnectionForced (320).
                         // ReplySuccess is (usually) passed when the connection is closed from current running program.
                         // ConnectionForced is (usually) passed when the connected node (broker) is restarted on purpose, e.g. on upgrades.
@@ -842,7 +860,7 @@ module RPC =
                         match pendingRequests.TryRemove correlationId with
                         | true, tcs ->
                             // Ensure the message body is copied before setting the response.
-                            let response = Some (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
+                            let response = Replied (eventArgs.BasicProperties, eventArgs.Body.ToArray ())
 
                             if not (tcs.TrySetResult response) then
                                 model.logger.LogWarning (
@@ -952,7 +970,7 @@ module RPC =
                                 model.pendingRequests.TryRemove messageId |> ignore
 
                                 // Try set timed out response.
-                                requestCompletionSource.TrySetResult None |> ignore
+                                requestCompletionSource.TrySetResult TimedOut |> ignore
                         , useSynchronizationContext = false
                     )
 
@@ -984,9 +1002,11 @@ module RPC =
                                 body = requestBody
                             )
 
-                        // Wait until response received, or timed out (None).
+                        // Wait until response received, timed out or the channel was shut down.
                         match! requestCompletionSource.Task with
-                        | None ->
+                        | Replied (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+
+                        | TimedOut ->
                             return
                                 Error (
                                     RequestTimedOut {
@@ -996,7 +1016,15 @@ module RPC =
                                     }
                                 )
 
-                        | Some (basicProperties, body) -> return Ok (mapResponse basicProperties body)
+                        | ChannelShutdown (replyCode, replyText) ->
+                            return
+                                Error (
+                                    ConnectionInRecoveryMode {
+                                        clientName = model.clientName
+                                        replyCode = replyCode
+                                        replyText = replyText
+                                    }
+                                )
 
                     else
                         return

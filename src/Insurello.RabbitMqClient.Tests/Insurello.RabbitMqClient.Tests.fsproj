@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <OutputType>Exe</OutputType>
+
+        <IsPackable>false</IsPackable>
+
+        <!-- Enable opt-in warnings:
+        1182   = Unused variables
+        3389   = Implicit numeric widening
+        FS3560 = Copy and update changes all fields
+        -->
+        <WarnOn>1182,3389,FS3560</WarnOn>
+
+        <!-- Set enabled warnings as error during development:
+        FS0025 = Incomplete pattern matching
+        -->
+        <WarningsAsErrors>3389,FS0025</WarningsAsErrors>
+    </PropertyGroup>
+
+    <!-- Tested project -->
+    <ItemGroup>
+        <ProjectReference Include="../Insurello.RabbitMqClient/Insurello.RabbitMqClient.fsproj" />
+    </ItemGroup>
+
+    <!-- Test helpers -->
+    <ItemGroup>
+        <Compile Include="ManagementApiClient.fs" />
+        <Compile Include="Helpers.fs" />
+    </ItemGroup>
+
+    <!-- Tests -->
+    <ItemGroup>
+        <Compile Include="ConnectionClosedTest.fs" />
+    </ItemGroup>
+
+    <!-- Dependencies -->
+    <ItemGroup>
+        <PackageReference Include="xunit.v3" Version="4.0.2" />
+    </ItemGroup>
+</Project>
