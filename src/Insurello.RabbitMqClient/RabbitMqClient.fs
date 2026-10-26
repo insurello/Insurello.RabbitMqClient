@@ -581,6 +581,9 @@ module Consumer =
     let tryAck (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOrNackOutcome> =
         async {
             // `BasicAckAsync` doesn't always throw while the connection is closed, so check first.
+            // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
+            // when the connection closes and acks only apply on the connection the message was delivered on,
+            // so at worst the message is consumed one more time.
             if model.connection.IsOpen then
                 try
                     do!
@@ -610,6 +613,9 @@ module Consumer =
     let tryNack (ReceivedMessage (message, model): ReceivedMessage) : Async<AckOrNackOutcome> =
         async {
             // `BasicNackAsync` doesn't always throw while the connection is closed, so check first.
+            // Racing with the connection closing or recovering is harmless: RabbitMQ requeues all unacked messages
+            // when the connection closes and nacks only apply on the connection the message was delivered on,
+            // so the message is consumed again either way.
             if model.connection.IsOpen then
                 try
                     do!
