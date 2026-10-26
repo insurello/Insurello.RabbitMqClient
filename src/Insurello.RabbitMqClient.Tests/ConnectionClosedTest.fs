@@ -9,16 +9,6 @@ type private RequestResult = Result<RabbitMqClient.RPC.ResponseMessage, RabbitMq
 let private managementApiClient =
     ManagementApiClient.init Helpers.managementPort Helpers.nodeEndpoints
 
-/// Nothing consumes the queue, so the request will never get a reply.
-let private requestWithoutReply (rpcClient: RabbitMqClient.RPC.Client) : Async<RequestResult> =
-    rpcClient
-    |> RabbitMqClient.RPC.request {
-        queue = Helpers.uniqueName "no-consumer"
-        headers = []
-        body = RabbitMqClient.RPC.Json "{}"
-        timeout = System.TimeSpan.FromSeconds 30.
-    }
-
 let inline private expectConnectionInRecoveryMode (expectedReplyCode: int) (result: RequestResult) : unit =
     match result with
     | Error (RabbitMqClient.RPC.ConnectionInRecoveryMode details) -> Assert.Equal (expectedReplyCode, details.replyCode)
@@ -60,46 +50,100 @@ let private consume
     }
     |> Async.Ignore
 
+/// Consumes RPC requests without ever replying, so they stay pending until the requester's connection closes.
+/// Pass a separate connection, so closing the requester's connection doesn't affect it.
+/// The returned task completes when a request has arrived, i.e. it has been published and is waiting for a reply.
+let private startSilentResponder
+    (requestQueueName: string)
+    (connection: RabbitMqClient.Connection)
+    : Async<Task<unit>> =
+    async {
+        let requestReceived =
+            TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
+
+        do!
+            connection
+            |> consume
+                requestQueueName
+                (fun message ->
+                    async {
+                        requestReceived.TrySetResult () |> ignore
+
+                        do! RabbitMqClient.Consumer.ack message
+                    }
+                )
+
+        return requestReceived.Task
+    }
+
+let private requestWithoutReply
+    (requestQueueName: string)
+    (rpcClient: RabbitMqClient.RPC.Client)
+    : Async<RequestResult> =
+    rpcClient
+    |> RabbitMqClient.RPC.request {
+        queue = requestQueueName
+        headers = []
+        body = RabbitMqClient.RPC.Json "{}"
+        timeout = System.TimeSpan.FromSeconds 30.
+    }
+
 [<Fact>]
 let ``Pending RPC request fails immediately when the broker forces the connection to close`` () =
+    let connectionName = Helpers.uniqueName "rpc-forced-close"
+    let requestQueueName = Helpers.uniqueName "rpc-forced-close-requests"
+
     async {
-        let connectionName = Helpers.uniqueName "rpc-forced-close"
+        try
+            use! responderConnection =
+                Helpers.connectionConfig (Helpers.uniqueName "silent-responder")
+                |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
 
-        use! connection =
-            Helpers.connectionConfig connectionName
-            |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+            let! requestReceived = responderConnection |> startSilentResponder requestQueueName
 
-        let! rpcClient = RabbitMqClient.RPC.init "TestRpcClient" connection
+            use! connection =
+                Helpers.connectionConfig connectionName
+                |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
 
-        let! pendingRequest = requestWithoutReply rpcClient |> Async.StartChild
+            let! rpcClient = RabbitMqClient.RPC.init "TestRpcClient" connection
 
-        do! managementApiClient.forceCloseConnection connectionName
+            let! pendingRequest = rpcClient |> requestWithoutReply requestQueueName |> Async.StartChild
 
-        let stopwatch = System.Diagnostics.Stopwatch.StartNew ()
+            do! requestReceived.WaitAsync (System.TimeSpan.FromSeconds 10.) |> Async.AwaitTask
 
-        let! result = pendingRequest
+            do! managementApiClient.forceCloseConnection connectionName
 
-        result |> expectConnectionInRecoveryMode 320
+            let stopwatch = System.Diagnostics.Stopwatch.StartNew ()
 
-        stopwatch |> expectWithin (System.TimeSpan.FromSeconds 5.)
+            let! result = pendingRequest
+
+            result |> expectConnectionInRecoveryMode 320
+
+            stopwatch |> expectWithin (System.TimeSpan.FromSeconds 5.)
+        finally
+            managementApiClient.deleteQueue requestQueueName |> Async.RunSynchronously
     }
 
 [<Fact>]
 let ``Closing the connection while a message handler waits for an RPC reply doesn't block or throw`` () =
     let connectionName = Helpers.uniqueName "graceful-close"
     let queueName = Helpers.uniqueName "graceful-close"
+    let requestQueueName = Helpers.uniqueName "graceful-close-requests"
 
     async {
         try
+            use! responderConnection =
+                Helpers.connectionConfig (Helpers.uniqueName "silent-responder")
+                |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
+
+            let! requestReceived = responderConnection |> startSilentResponder requestQueueName
+
             let! connection =
                 Helpers.connectionConfig connectionName
                 |> RabbitMqClient.Connection.init Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance
 
             let! rpcClient = RabbitMqClient.RPC.init "TestRpcClient" connection
             let! publishClient = RabbitMqClient.Publish.init "TestPublishClient" connection
-
-            let handlerStarted =
-                TaskCompletionSource<unit> TaskCreationOptions.RunContinuationsAsynchronously
 
             let handlerResult =
                 TaskCompletionSource<RequestResult> TaskCreationOptions.RunContinuationsAsynchronously
@@ -110,9 +154,7 @@ let ``Closing the connection while a message handler waits for an RPC reply does
                     queueName
                     (fun _ ->
                         async {
-                            handlerStarted.TrySetResult () |> ignore
-
-                            let! result = requestWithoutReply rpcClient
+                            let! result = rpcClient |> requestWithoutReply requestQueueName
 
                             handlerResult.TrySetResult result |> ignore
                         }
@@ -120,9 +162,7 @@ let ``Closing the connection while a message handler waits for an RPC reply does
 
             do! publish publishClient queueName
 
-            do!
-                handlerStarted.Task.WaitAsync (System.TimeSpan.FromSeconds 10.)
-                |> Async.AwaitTask
+            do! requestReceived.WaitAsync (System.TimeSpan.FromSeconds 10.) |> Async.AwaitTask
 
             // Must not wait for the pending RPC request to time out (30 s), which also made closing throw `TaskCanceledException`.
             let stopwatch = System.Diagnostics.Stopwatch.StartNew ()
@@ -136,6 +176,7 @@ let ``Closing the connection while a message handler waits for an RPC reply does
             result |> expectConnectionInRecoveryMode 200
         finally
             managementApiClient.deleteQueue queueName |> Async.RunSynchronously
+            managementApiClient.deleteQueue requestQueueName |> Async.RunSynchronously
     }
 
 [<Fact>]
