@@ -396,7 +396,7 @@ let ``A delayed nack logs a warning when the connection closes during the delay`
 
             do! managementApiClient.forceCloseConnection connectionName
 
-            do! logger |> CapturingLogger.waitForWarning "Unable to nack message"
+            do! logger |> CapturingLogger.waitForWarning "Skipped the delayed nack of message"
 
             do! logger |> CapturingLogger.waitForWarning "because the connection is closed"
         finally
