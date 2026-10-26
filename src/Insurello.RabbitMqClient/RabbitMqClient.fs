@@ -571,7 +571,7 @@ module Consumer =
         (model: ConsumerModel)
         : unit =
         model.logger.LogWarning (
-            "Unable to {operation} message ({messageId}) from queue {consumedQueue}. The connection is closed and waiting to be recovered. The message will be consumed again once a new connection has been established",
+            "Unable to {operation} message ({messageId}) from queue {consumedQueue} because the connection is closed. RabbitMQ requeues all unacked messages when the connection closes, so the message will be consumed again",
             operation,
             message.messageId,
             model.consumedQueue
