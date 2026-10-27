@@ -13,9 +13,16 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - uses: actions/setup-dotnet@v6
+        with:
+          global-json-file: global.json
+
       - name: dotnet pack
+        # PathMap=$PWD=/_ works around the F# compiler writing "/_//src/..." into the PDB
+        # with the SDK's default "<repo>/=/_/" mapping. Without it the PDB paths don't match
+        # the "/_/src/..." paths in the F# metadata, and Ionide's go to definition fails.
         run: |
-          dotnet pack --configuration Release --warnaserror --output out/Release -p:ContinuousIntegrationBuild=true -p:EmbedAllSources=true -p:DeterministicSourcePaths=true -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
+          dotnet pack --configuration Release --warnaserror --output out/Release -p:ContinuousIntegrationBuild=true -p:EmbedAllSources=true -p:DeterministicSourcePaths=true -p:PathMap=$PWD=/_ -p:PackageVersion=${GITHUB_REF/refs\/tags\/v/''}
 
       - uses: NuGet/login@v1
         id: login
